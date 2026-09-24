@@ -357,6 +357,21 @@ var SOUND = (function () {
       slide(850, 1050, 0.7, 0.6, 'sawtooth', 0.18 * v);
     },
 
+    // --- Kitchen fires -------------------------------------------------------
+
+    // An explosion: a deep thump that drops away, with a roar of static
+    // over the top that rumbles down into the low end.
+    boom: function (v) {
+      slide(160, 35, 0, 0.5, 'sine', 0.5 * v);
+      noise(0, 0.7, 3000, 0.45 * v, 120);
+    },
+
+    // The extinguisher: a long, bright "pssssh" of spray.
+    extinguish: function (v) {
+      noise(0, 0.5, 6000, 0.3 * v, 2500);
+      tone(1318, 0.35, 0.12, 'triangle', 0.18 * v);
+    },
+
     // --- Round end ----------------------------------------------------------
 
     // Winning the round: a triumphant fanfare — a quick climbing run of

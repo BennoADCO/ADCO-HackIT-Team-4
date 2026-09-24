@@ -161,7 +161,23 @@ var CONFIG = {
   SABOTEUR_X: 30,
   SABOTEUR_SIZE: 38,
   SABOTAGE_MENU_X: 66,         // where the first menu item starts
-  SABOTAGE_MENU_SPACING: 125,  // gap between menu items. Shrink to ~95 for 4 items.
+  SABOTAGE_MENU_SPACING: 205,  // gap between menu items. Wide enough to leave room
+                               // for the shady character between them.
+
+  // The two shady characters lurking at the bottom of the screen, in trench
+  // coats, hats and sunglasses. They keep glancing up-left and up-right, as
+  // if checking nobody is watching. Drawn in shapes, so no picture needed.
+  // Positions are fractions of the whole screen width: 0.25 = a quarter of
+  // the way across from the left, 0.75 = three quarters.
+  SHADY_POSITIONS: [0.25, 0.75],
+  SHADY_FEET_Y: 597,        // where their feet are (600 is the very bottom)
+  SHADY_SCALE: 0.8,         // 1 = normal size. Bigger than 0.8 pokes out of the strip.
+  SHADY_GLANCE_MIN: 0.5,    // shortest wait before one looks somewhere new (seconds)
+  SHADY_GLANCE_MAX: 1.4,    // longest wait
+  SHADY_TURN_SPEED: 14,     // how fast their heads snap round. Higher = twitchier.
+  SHADY_COAT: '#5b4a3a',    // trench coat colour
+  SHADY_HAT: '#2b2622',     // hat colour
+  SHADY_SKIN: '#e2b48c',
 
 
   // ==========================================================================
@@ -189,6 +205,38 @@ var CONFIG = {
   BIN:     { x: 225, y: 495, size: 56, emoji: '🗑️', label: 'BIN' },
   // The serving counter, just under the customer. Walk into it holding a plate.
   COUNTER: { x: 225, y: 168, w: 170, h: 40, label: '🛎️ SERVE' },
+
+  // The fire extinguisher, hanging on a hook just right of the oven.
+  // Walk into it to grab it; walk into a fire while holding it to put it out.
+  EXTINGUISHER: { x: 300, y: 350, size: 44, emoji: '🧯', label: 'FIRE' },
+
+
+  // ==========================================================================
+  //  KITCHEN FIRES 💥🔥
+  // ==========================================================================
+  //
+  //  Every so often something explodes in each kitchen and leaves a fire.
+  //  Grab the 🧯 next to the oven and walk into the fire to put it out.
+  //  If it's still burning when the time runs out, you pay for the damage.
+  //  Each kitchen gets its own fires, at its own random times.
+
+  FIRES_ON: true,              // false = no fires at all
+  FIRE_FIRST_DELAY: 20,        // seconds into a round before the first explosion
+  FIRE_GAP_MIN: 15,            // shortest wait between fires (seconds)
+  FIRE_GAP_MAX: 30,            // longest wait between fires (seconds)
+  FIRE_SECONDS: 10,            // how long you have to put it out
+  FIRE_SIZE: 50,               // how big the fire is drawn (the hitbox is 75% of this)
+  FIRE_DAMAGE: 100,            // $ lost if it burns out. Money never goes below $0.
+  FIRE_PUT_OUT_POINTS: 1,      // sabotage points for putting one out
+  FIRE_BOOM_SECONDS: 0.5,      // how long the 💥 shows before it turns into 🔥
+
+  // Where fires can break out. Kept clear of the stations, oven and bin so
+  // there's always a way to reach them. Add or move spots freely.
+  FIRE_SPOTS: [
+    { x: 140, y: 250 }, { x: 310, y: 250 },
+    { x: 140, y: 350 },
+    { x: 140, y: 450 }, { x: 310, y: 450 }
+  ],
 
 
   // ==========================================================================
@@ -374,6 +422,11 @@ var CONFIG = {
     HINT_HANDS_FULL:  'Hands full! Use the 🗑️',
     HINT_FROZEN:      '🧊 Frozen shut!',
     HINT_COOK_FIRST:  'Cook it in the 🔥 first!',
+    HINT_GET_EXTINGUISHER: 'Grab the 🧯 by the oven!',
+
+    FIRE_STARTED:     '💥 FIRE!',
+    FIRE_PUT_OUT:     'Fire out!',
+    FIRE_BURNED:      '🔥 Burned! -$',
 
     NOT_ENOUGH_POINTS: 'Not enough pts!',
     ALREADY_SABOTAGED: 'They are already sabotaged!',

@@ -46,6 +46,21 @@ var clock = 0;            // seconds since the page opened (for blinking and bob
 // This list grows as customers are needed.
 var dishSequence = [];
 
+// The shady characters at the bottom of the screen, one per entry in
+// CONFIG.SHADY_POSITIONS. For each one, 'look' is where his head points
+// right now: -1 = up-left, 0 = straight at you, 1 = up-right. 'target' is
+// where it's turning to, and 'timer' counts down to his next glance.
+// They start looking opposite ways so they don't move in step.
+var shadies = [];
+for (var s = 0; s < CONFIG.SHADY_POSITIONS.length; s++) {
+  shadies.push({
+    x: CONFIG.WIDTH * CONFIG.SHADY_POSITIONS[s],
+    look: 0,
+    target: (s % 2 === 0) ? -1 : 1,
+    timer: 0.3 + s * 0.6
+  });
+}
+
 
 // ============================================================================
 //  2. SETTING UP A ROUND
@@ -95,6 +110,12 @@ function makePlayer(index) {
       timer: 0,           // counts down while 'leaving' or 'empty'
       count: 0            // how many customers this player has had
     },
+
+    // Kitchen fires: 'fire' is the one burning now ({ x, y, timeLeft, age })
+    // or null. 'fireTimer' counts down to the next explosion.
+    fire: null,
+    fireTimer: CONFIG.FIRE_FIRST_DELAY,
+    hasExtinguisher: false,
 
     sabotage: null,       // the sabotage hitting THIS player, or null
     announce: null,       // the big "OVEN FREEZE!" message, or null
@@ -239,6 +260,11 @@ function update(dt) {
   clock = clock + dt;
   updateFloatingTexts(dt);
 
+  // The shady characters keep glancing about on every screen, even the title.
+  for (var s = 0; s < shadies.length; s++) {
+    updateShady(shadies[s], dt);
+  }
+
   // Nothing moves on the title screen or after a win.
   if (state !== 'playing') {
     return;
@@ -251,12 +277,36 @@ function update(dt) {
     checkStations(p);
     updateOven(p, dt);
     updateCustomer(p, dt);
+    updateFire(p, dt);
 
     // Someone may have just won — stop right here if so.
     if (state !== 'playing') {
       return;
     }
   }
+}
+
+// Make one shady character glance nervously over his shoulders.
+// Every so often he picks somewhere new to look. Mostly he flicks between
+// up-left and up-right, and now and then he stares straight at you. His
+// head doesn't jump; it swings quickly round, which reads as a nervous snap.
+function updateShady(shady, dt) {
+  shady.timer = shady.timer - dt;
+  if (shady.timer <= 0) {
+    if (shady.target !== 0 && Math.random() < 0.25) {
+      shady.target = 0;                              // a quick look at the players
+    } else if (shady.target === 0) {
+      shady.target = Math.random() < 0.5 ? -1 : 1;   // back to scanning
+    } else {
+      shady.target = -shady.target;                  // the other shoulder
+    }
+    shady.timer = CONFIG.SHADY_GLANCE_MIN +
+                  Math.random() * (CONFIG.SHADY_GLANCE_MAX - CONFIG.SHADY_GLANCE_MIN);
+  }
+
+  // Swing the head a fraction of the way towards the target each frame.
+  var turn = Math.min(1, CONFIG.SHADY_TURN_SPEED * dt);
+  shady.look = shady.look + (shady.target - shady.look) * turn;
 }
 
 // Move the chef with their keys.
@@ -363,6 +413,28 @@ function checkStations(p) {
   if (onCounter) {
     useCounter(p, enteredCounter);
   }
+
+  // --- Fire extinguisher: grab it off the hook ---
+  // You can carry it as well as your food, so grabbing it never costs you
+  // what's in your hands.
+  var e = CONFIG.EXTINGUISHER;
+  var onExtinguisher = chefTouches(p, e.x, e.y, e.size, e.size);
+  var enteredExtinguisher = updateInside(p, 'extinguisher', onExtinguisher);
+  if (enteredExtinguisher && !p.hasExtinguisher) {
+    p.hasExtinguisher = true;
+    sfx('pickup');
+  }
+
+  // --- A fire: put it out if you've got the extinguisher ---
+  if (p.fire !== null) {
+    var onFire = chefTouches(p, p.fire.x, p.fire.y, CONFIG.FIRE_SIZE, CONFIG.FIRE_SIZE);
+    var enteredFire = updateInside(p, 'fire', onFire);
+    if (onFire && p.hasExtinguisher) {
+      putOutFire(p);
+    } else if (enteredFire) {
+      addFloatingText(p, p.fire.x, p.fire.y - 45, CONFIG.TEXT.HINT_GET_EXTINGUISHER, CONFIG.COLORS.HINT);
+    }
+  }
 }
 
 // Walked into an ingredient station.
@@ -443,6 +515,70 @@ function useCounter(p, justEntered) {
   } else if (justEntered && p.plate === null && p.held.length > 0) {
     addFloatingText(p, CONFIG.COUNTER.x, CONFIG.COUNTER.y + 40, CONFIG.TEXT.HINT_COOK_FIRST, CONFIG.COLORS.HINT);
   }
+}
+
+
+// ----------------------------------------------------------------------------
+//  Kitchen fires 💥🔥
+// ----------------------------------------------------------------------------
+
+// Pick a random wait before the next explosion.
+function nextFireGap() {
+  return CONFIG.FIRE_GAP_MIN + Math.random() * (CONFIG.FIRE_GAP_MAX - CONFIG.FIRE_GAP_MIN);
+}
+
+// Tick the fire clock: count down to the next explosion, or, if a fire is
+// already burning, count down until it does its damage.
+function updateFire(p, dt) {
+  if (!CONFIG.FIRES_ON) return;
+
+  if (p.fire === null) {
+    p.fireTimer = p.fireTimer - dt;
+    if (p.fireTimer <= 0) {
+      startFire(p);
+    }
+    return;
+  }
+
+  p.fire.age = p.fire.age + dt;
+  p.fire.timeLeft = p.fire.timeLeft - dt;
+  if (p.fire.timeLeft <= 0) {
+    burnOut(p);
+  }
+}
+
+// KABOOM. A fire appears at one of the fire spots.
+function startFire(p) {
+  var spot = randomItem(CONFIG.FIRE_SPOTS);
+  p.fire = { x: spot.x, y: spot.y, timeLeft: CONFIG.FIRE_SECONDS, age: 0 };
+  p.inside.fire = false;   // so walking into it counts as "just entered"
+  p.shake = CONFIG.SABOTAGE_SHAKE_SECONDS;
+  addFloatingText(p, spot.x, spot.y - 45, CONFIG.TEXT.FIRE_STARTED, CONFIG.COLORS.WRONG, 24);
+  sfx('boom');
+}
+
+// Walked into the fire holding the extinguisher. The extinguisher is now
+// empty, so it goes back on its hook for next time.
+function putOutFire(p) {
+  addFloatingText(p, p.fire.x, p.fire.y - 45,
+                  CONFIG.TEXT.FIRE_PUT_OUT + ' +' + CONFIG.FIRE_PUT_OUT_POINTS + ' ' + CONFIG.TEXT.POINTS_LABEL,
+                  CONFIG.COLORS.POINTS);
+  p.points = p.points + CONFIG.FIRE_PUT_OUT_POINTS;
+  p.fire = null;
+  p.hasExtinguisher = false;
+  p.fireTimer = nextFireGap();
+  sfx('extinguish');
+}
+
+// Nobody put it out in time. Pay for the damage.
+function burnOut(p) {
+  var lost = Math.min(p.money, CONFIG.FIRE_DAMAGE);
+  p.money = p.money - lost;
+  addFloatingText(p, p.fire.x, p.fire.y - 45, CONFIG.TEXT.FIRE_BURNED + lost, CONFIG.COLORS.WRONG, 22);
+  p.fire = null;
+  p.fireTimer = nextFireGap();
+  p.shake = CONFIG.SABOTAGE_SHAKE_SECONDS;
+  sfx('wrong');
 }
 
 
@@ -665,6 +801,11 @@ function draw(ctx) {
   ctx.fillStyle = C.DIVIDER;
   ctx.fillRect(CONFIG.HALF_WIDTH - 2, 0, 4, CONFIG.HEIGHT);
 
+  // The shady characters, lurking at the bottom of the screen
+  for (var s = 0; s < shadies.length; s++) {
+    drawShady(ctx, shadies[s]);
+  }
+
   drawFloatingTexts(ctx);
 
   if (state === 'over') {
@@ -703,6 +844,8 @@ function drawHalf(ctx, p) {
   drawStations(ctx);
   drawOven(ctx, p);
   drawBin(ctx);
+  drawExtinguisher(ctx, p);
+  drawFire(ctx, p);
   drawChef(ctx, p);
   drawSaboteurStrip(ctx, p);
   drawSabotageBadge(ctx, p);
@@ -906,6 +1049,58 @@ function drawBin(ctx) {
   drawText(ctx, b.label, b.x, b.y + half - 7, 10, C.TEXT, 'center', true);
 }
 
+// --- The fire extinguisher on its hook (faded while someone's carrying it) ---
+function drawExtinguisher(ctx, p) {
+  var C = CONFIG.COLORS;
+  var e = CONFIG.EXTINGUISHER;
+  var half = e.size / 2;
+
+  if (p.hasExtinguisher) {
+    ctx.globalAlpha = 0.3;
+  }
+  drawRoundRect(ctx, e.x - half, e.y - half, e.size, e.size, 8, C.TILE, C.WRONG, 2);
+  drawEmoji(ctx, e.emoji, e.x, e.y - 4, 28);
+  drawText(ctx, e.label, e.x, e.y + half - 7, 9, C.WRONG, 'center', true);
+  ctx.globalAlpha = 1;
+}
+
+// --- A fire: a big 💥 for a moment, then a flickering 🔥 with a countdown ---
+function drawFire(ctx, p) {
+  var f = p.fire;
+  if (f === null) return;
+  var C = CONFIG.COLORS;
+  var size = CONFIG.FIRE_SIZE;
+
+  if (f.age < CONFIG.FIRE_BOOM_SECONDS) {
+    // The explosion swells up, then the fire takes over.
+    var grow = 0.6 + (f.age / CONFIG.FIRE_BOOM_SECONDS) * 0.8;
+    drawEmoji(ctx, '💥', f.x, f.y, size * grow);
+    return;
+  }
+
+  // Scorch mark on the floor
+  ctx.globalAlpha = 0.35;
+  ctx.fillStyle = '#000000';
+  ctx.beginPath();
+  ctx.ellipse(f.x, f.y + size * 0.35, size * 0.55, size * 0.18, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // Flickering flames: one big, two small ones either side
+  var flicker = Math.sin(clock * 20) * 3;
+  drawEmoji(ctx, '🔥', f.x - 16, f.y + 8, size * 0.5 - flicker);
+  drawEmoji(ctx, '🔥', f.x + 16, f.y + 8, size * 0.5 + flicker);
+  drawEmoji(ctx, '🔥', f.x, f.y, size + flicker);
+
+  // Seconds left, turning red for the last 3
+  var secondsLeft = Math.ceil(f.timeLeft);
+  var color = C.TEXT;
+  if (secondsLeft <= 3) {
+    color = C.WRONG;
+  }
+  drawText(ctx, secondsLeft + 's', f.x, f.y - size * 0.7, 18, color, 'center', true, C.OUTLINE);
+}
+
 // --- The chef, their floor ring, and what they're carrying ---
 function drawChef(ctx, p) {
   var C = CONFIG.COLORS;
@@ -939,6 +1134,11 @@ function drawChef(ctx, p) {
     bob = Math.abs(Math.sin(clock * 16)) * -4;
   }
   drawEmoji(ctx, p.emoji, p.x, p.y + bob, size);
+
+  // Holding the extinguisher: it sits at the chef's side
+  if (p.hasExtinguisher) {
+    drawEmoji(ctx, CONFIG.EXTINGUISHER.emoji, p.x + size * 0.45, p.y + 6 + bob, 24);
+  }
 
   // Carried things float over the chef's head
   var carryY = p.y - size * 0.75 + bob;
@@ -989,6 +1189,113 @@ function drawSaboteurStrip(ctx, p) {
     drawText(ctx, sab.cost + CONFIG.TEXT.POINTS_LABEL, x + 62, midY + 1, 15, C.POINTS, 'left', true);
     ctx.globalAlpha = 1;
   }
+}
+
+// --- A shady character: trench coat, collar up, hat, sunglasses ---
+// Drawn entirely from shapes. All the measurements below are relative to
+// the spot between his feet, and "up" is a minus number.
+function drawShady(ctx, shady) {
+  var look = shady.look;               // -1 up-left, 0 at you, 1 up-right
+  var lookingUp = Math.abs(look);      // 0 to 1: how far his chin is raised
+
+  ctx.save();
+  ctx.translate(shady.x, CONFIG.SHADY_FEET_Y);
+  ctx.scale(CONFIG.SHADY_SCALE, CONFIG.SHADY_SCALE);
+
+  // A shadow on the floor under his feet.
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath();
+  ctx.ellipse(0, -1, 20, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // --- Legs and shoes ---
+  ctx.fillStyle = '#2a2a30';
+  ctx.fillRect(-7, -14, 5, 13);
+  ctx.fillRect(2, -14, 5, 13);
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.ellipse(-5, -1, 5, 2.5, 0, 0, Math.PI * 2);
+  ctx.ellipse(5, -1, 5, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // --- The trench coat: wide at the hem, narrower at the shoulders ---
+  ctx.fillStyle = CONFIG.SHADY_COAT;
+  ctx.beginPath();
+  ctx.moveTo(-13, -50);
+  ctx.lineTo(13, -50);
+  ctx.lineTo(17, -12);
+  ctx.lineTo(-17, -12);
+  ctx.closePath();
+  ctx.fill();
+
+  // The belt and the line down the middle.
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fillRect(-15, -32, 30, 3);
+  ctx.fillRect(-0.5, -48, 1, 36);
+  ctx.fillStyle = '#c9a34a';
+  ctx.fillRect(-2, -32, 4, 3);                 // belt buckle
+
+  // Hands stuffed in the pockets.
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.fillRect(-12, -26, 6, 2);
+  ctx.fillRect(6, -26, 6, 2);
+
+  // --- The head: tilts towards wherever he's looking ---
+  ctx.save();
+  ctx.translate(0, -51);                       // pivot at the neck
+  ctx.rotate(look * 0.3);
+
+  // Face.
+  ctx.fillStyle = CONFIG.SHADY_SKIN;
+  ctx.beginPath();
+  ctx.arc(0, -9, 9, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Sunglasses. They slide towards the side he's looking at, and up a
+  // little as he raises his chin, so it reads as a glance, not a wobble.
+  var gx = look * 3.5;
+  var gy = -10 - lookingUp * 1.5;
+  ctx.fillStyle = '#0d0d0d';
+  ctx.fillRect(gx - 7, gy - 1.8, 5.5, 3.6);
+  ctx.fillRect(gx + 1.5, gy - 1.8, 5.5, 3.6);
+  ctx.fillRect(gx - 2, gy - 1.2, 4, 1.2);      // the bridge over the nose
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';    // a glint on each lens
+  ctx.fillRect(gx - 6, gy - 1.2, 1.5, 1);
+  ctx.fillRect(gx + 2.5, gy - 1.2, 1.5, 1);
+
+  // A sly little smirk, lopsided towards where he's looking.
+  ctx.strokeStyle = '#6b3b2a';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(gx - 2, -4.5);
+  ctx.lineTo(gx + 2.5, -5.5 - lookingUp);
+  ctx.stroke();
+
+  // The hat: a brim, the crown, and a band.
+  ctx.fillStyle = CONFIG.SHADY_HAT;
+  ctx.beginPath();
+  ctx.ellipse(0, -15, 14, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillRect(-8.5, -24, 17, 9);
+  ctx.fillStyle = '#7a2b2b';
+  ctx.fillRect(-8.5, -18, 17, 2.5);
+
+  ctx.restore();                               // done with the tilted head
+
+  // --- The popped collar, drawn last so it hides his chin ---
+  ctx.fillStyle = CONFIG.SHADY_COAT;
+  ctx.beginPath();
+  ctx.moveTo(-13, -50);
+  ctx.lineTo(-7, -57);
+  ctx.lineTo(-3, -47);
+  ctx.closePath();
+  ctx.moveTo(13, -50);
+  ctx.lineTo(7, -57);
+  ctx.lineTo(3, -47);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
 }
 
 // --- "🧊 FROZEN 4s" badge in the corner while being sabotaged ---
