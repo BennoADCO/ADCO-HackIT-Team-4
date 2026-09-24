@@ -1,0 +1,62 @@
+/* ==========================================================================
+   SPUD RUSH — the page around the game
+
+   This file only controls the web page the game sits on: the background
+   colour, the centring, and the line of text underneath.
+
+   It does NOT control anything inside the kitchen. Potato sizes, station
+   positions and colours all live in js/config.js.
+   ========================================================================== */
+
+
+/* Fill the whole browser window and put everything in the middle. */
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #2a2320;          /* the dark brown around the game */
+  color: #d9d2c2;
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+
+  font-family: system-ui, "Segoe UI", sans-serif;
+}
+
+
+/* The game itself.
+
+   The canvas is 1000 x 1000 real dots, but the game thinks it is 500 x 500
+   and draws at double size so it stays sharp. The rule below stretches it to
+   fit the window without ever changing those numbers.
+
+   "vmin" means "the smaller of the window's width and height", so the game
+   always stays square and always fits, whatever shape the window is. */
+#game {
+  width: min(88vmin, 900px);
+  height: min(88vmin, 900px);
+
+  display: block;
+  border-radius: 8px;
+  outline: none;
+  cursor: pointer;
+
+  background: #d3ccbc;          /* shows for a moment before the art loads */
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+
+/* The controls reminder under the game. */
+.hint {
+  margin: 0;
+  font-size: 14px;
+  text-align: center;
+  color: #9a9086;
+}
+
+.hint b {
+  color: #f2c230;
+  font-weight: 600;
+}

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Spud Rush</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<!-- The look of the page around the game. Not the game itself. -->
+<link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+
+  <!-- The game is drawn entirely inside this one square. -->
+  <canvas id="game" width="1000" height="1000"></canvas>
+
+  <p class="hint">
+    Click the kitchen, then <b>arrow keys</b> or <b>WASD</b> to walk
+    &nbsp;·&nbsp; <b>Space</b> to use whatever is glowing
+    &nbsp;·&nbsp; <b>R</b> to start again
+  </p>
+
+  <!--
+    The three script files, in the order they must load.
+
+      config.js  —  every number and word in the game. Edit this one.
+      sound.js   —  makes all the beeps and the tune. No sound files needed.
+      game.js    —  the rules and the drawing. Edit this one less often.
+
+    config.js MUST come first, because the other two read its settings.
+  -->
+  <script src="js/config.js"></script>
+  <script src="js/sound.js"></script>
+  <script src="js/game.js"></script>
+
+</body>
+</html>
