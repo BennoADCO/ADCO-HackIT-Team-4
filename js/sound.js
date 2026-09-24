@@ -458,22 +458,13 @@ var SOUND = (function () {
   // ==========================================================================
   //  MUTE
   // ==========================================================================
-
-  function loadMuted() {
-    try { return localStorage.getItem('spudrush.muted') === 'yes'; }
-    catch (err) { return false; }
-  }
-
-  function saveMuted(value) {
-    try { localStorage.setItem('spudrush.muted', value ? 'yes' : 'no'); }
-    catch (err) { /* blocked — it just won't be remembered next time */ }
-  }
-
-  muted = loadMuted();
+  //
+  //  M switches the sound off and on again. It is deliberately NOT remembered:
+  //  every time the game is opened the sound starts ON, so the next person to
+  //  play isn't left wondering why it's silent.
 
   function toggleMute() {
     muted = !muted;
-    saveMuted(muted);
     if (muted) stopMusic();
     return muted;
   }

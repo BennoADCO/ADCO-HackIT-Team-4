@@ -158,15 +158,17 @@ var CONFIG = {
   //  HELPER ROBOTS (the parts table)
   // ==========================================================================
   //
-  //  Walk to the parts table in the top left and press Space to build a
-  //  helper robot. It reads the customers' orders and fulfils them on its own.
+  //  Walk to the parts table in the top left and, with EMPTY hands, press
+  //  Space to build a helper robot. It reads the customers' orders and
+  //  fulfils them on its own.
   //
-  //  Helpers have NO battery — they just work. They are lost when you restart.
+  //  Helpers run on batteries (see HELPER_BATTERY_LASTS below). They are lost
+  //  when you restart.
   //
-  //  With the numbers below the robots cost 1, 2, 5 and 11 coins — cheap, so
-  //  the room can see them working straight away. Put HELPER_FIRST_COST back
-  //  up to about 60 once everyone has had a play, or the game gives itself
-  //  away in the first twenty seconds.
+  //  With the numbers below the robots cost 1, 2, 4, 9 and 20 coins — cheap,
+  //  so the room can see them working straight away. Put HELPER_FIRST_COST
+  //  back up to about 60 once everyone has had a play, or the game gives
+  //  itself away in the first twenty seconds.
 
   HELPER_FIRST_COST: 1,         // coins for helper number one
   HELPER_COST_MULTIPLIER: 2.2,  // each one costs this much more than the last
@@ -206,6 +208,16 @@ var CONFIG = {
   PARTS_Y: 208,
   PARTS_WIDTH: 60,
   PARTS_HEIGHT: 52,
+
+  // How close your feet must be to the FRONT of the parts table (the middle
+  // of its bottom edge) before Space will buy a robot there.
+  //
+  // The table stands out on the open floor, unlike everything else, which
+  // sits against a wall. Measured from its whole outline, a big patch of
+  // floor all the way round it would count as "at the table". Measured from
+  // one spot at the front, it takes up about as much floor as the other
+  // stations do. Bigger number = easier to hit.
+  PARTS_REACH: 24,
 
 
   // ==========================================================================
@@ -366,6 +378,10 @@ var CONFIG = {
   GAME_OVER_FLAT: 'FLAT BATTERY',        // shown when the battery ran out instead
   GAME_OVER_HINT: 'Press R to go again',
   TITLE_BATTERY: 'Keep your battery up — stand on the charger to refill',
+  // The two helper-robot lines. Keep each one about this long or shorter —
+  // anything wider than the screen gets squashed to fit.
+  TITLE_HELPERS: 'Parts table: empty hands + Space buys a helper for coins',
+  TITLE_FLAT: 'Flat helper? Empty hands + Space lifts it. Walk onto the charger',
   TITLE_MUTE: 'M to mute',
   BEST_LABEL: 'Best: ',
   COINS_LABEL: ' coins',

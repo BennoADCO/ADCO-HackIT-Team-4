@@ -222,7 +222,8 @@
   //  then walks the same route you would: bed, then paint, then oven, then
   //  the hatch. It is a simple list of steps — see helperThink below.
   //
-  //  Helpers never need charging. They are lost when the round restarts.
+  //  Helpers run on batteries. A flat one collapses until you carry it to the
+  //  charging pad. They are lost when the round restarts.
 
   // The four states of doneness, in order, so we can tell "past it" from
   // "not there yet" when a potato is sitting in the oven.
@@ -288,16 +289,31 @@
     return false;
   };
 
+  // Let go of the oven this helper had claimed.
+  //
+  // If the helper's own potato is still in there cooking, it gets marked
+  // "orphaned": nobody is coming back for it. Without that mark it would sit
+  // in the oven burning for ever, and no helper would ever use that oven
+  // again. With it, the next free helper knows to take it out and bin it.
+  //
+  // Only a helper that is 'waiting' has its own potato in the oven. A potato
+  // YOU put in is never marked, so no helper will ever touch it.
+  Game.prototype.releaseOven = function (h) {
+    if (!h.oven) return;
+    if (h.state === 'waiting' && h.oven.potato) h.oven.potato.orphaned = true;
+    h.oven.claimedBy = null;
+    h.oven = null;
+  };
+
   // Give up on the current job. Anything still in hand goes in the bin.
   Game.prototype.helperAbandon = function (h) {
     h.bay = -1;
     h.order = null;
-    if (h.oven) { h.oven.claimedBy = null; h.oven = null; }
+    this.releaseOven(h);
     h.state = h.holding ? 'toBin' : 'idle';
     h.station = h.holding ? this.bin : null;
   };
 
-  // Work out the next step for one helper. Called once per frame each.
   // A helper has run out of power. It drops whatever it was holding and lies
   // there until the player picks it up and carries it to the charging pad.
   Game.prototype.helperCollapse = function (h) {
@@ -307,12 +323,13 @@
     }
     h.bay = -1;
     h.order = null;
-    if (h.oven) { h.oven.claimedBy = null; h.oven = null; }
+    this.releaseOven(h);
     h.state = 'flat';
     h.station = null;
     this.puff(h.x, h.y - 20, '#8a7f78', 8);
   };
 
+  // Work out the next step for one helper. Called once per frame each.
   Game.prototype.helperThink = function (h, seconds) {
     // Collapsed, or slung over the player's shoulder: no thinking either way.
     if (h.state === 'flat' || h.carried) return;
@@ -327,13 +344,32 @@
 
     // At every step, check the job still exists. The player may have served
     // this customer, or they may have run out of patience and left.
-    if (h.state !== 'idle' && h.state !== 'toBin') {
+    // (A helper with no customer — idle, binning, or emptying an oven — has
+    // nothing to check.)
+    if (h.bay !== -1) {
       var customer = this.customers[h.bay];
       if (!customer || customer.state === 'leaving') { this.helperAbandon(h); return; }
     }
 
-    // --- Nothing to do: find a customer nobody else has claimed -------------
+    // --- Nothing to do: find some work --------------------------------------
     if (h.state === 'idle') {
+      // First job: any potato left behind in an oven by a helper that gave up
+      // or went flat. Until it's gone, that oven is out of action for every
+      // helper, so clearing it comes before taking a new order.
+      if (!h.holding) {
+        for (var o = 0; o < this.ovens.length; o++) {
+          var jammed = this.ovens[o];
+          if (jammed.potato && jammed.potato.orphaned && !jammed.claimedBy) {
+            jammed.claimedBy = h;
+            h.oven = jammed;
+            h.station = jammed;
+            h.state = 'toClear';
+            return;
+          }
+        }
+      }
+
+      // Otherwise, a customer nobody else has claimed.
       for (var i = 0; i < this.customers.length; i++) {
         var c = this.customers[i];
         if (!c || c.state === 'leaving' || this.bayTaken(i, h)) continue;
@@ -356,6 +392,36 @@
         this.puff(this.bin.x + 30, this.bin.y + 14, C.BIN_PUFF, 6);
         sfx('bin', HELPER_SFX);
       }
+      return;
+    }
+
+    // --- Off to empty an oven that somebody left a potato in ----------------
+    if (h.state === 'toClear') {
+      var oven = h.oven;
+
+      // You may have taken it out yourself while we were walking over. If so,
+      // never mind — and never touch a potato YOU have put in since.
+      if (!oven.potato || !oven.potato.orphaned) {
+        oven.claimedBy = null;
+        h.oven = null;
+        h.station = null;
+        h.state = 'idle';
+        return;
+      }
+
+      if (!this.walkHelper(h, oven.spot, seconds)) return;
+
+      // Take it out, then off to the bin with it. That frees the oven.
+      oven.potato.doneness = this.donenessAt(oven.timeIn);
+      oven.potato.orphaned = false;
+      h.holding = oven.potato;
+      oven.potato = null;
+      oven.claimedBy = null;
+      h.oven = null;
+      h.pause = C.HELPER_PAUSE;
+      h.state = 'toBin';
+      h.station = this.bin;
+      sfx('ovenOut', HELPER_SFX);
       return;
     }
 
@@ -650,13 +716,165 @@
 
 
   // ==========================================================================
+  //  WHAT WILL SPACE DO? — worked out fresh every frame
+  // ==========================================================================
+  //
+  //  Space does exactly one thing, and it is always the thing that is
+  //  glowing. This section decides what that thing is. The drawing code puts
+  //  a ring round it, and useStation() below does it. Both read the same
+  //  answer, so the glow and the Space bar can never disagree.
+  //
+  //  Things are checked in this order, and the first match wins:
+  //
+  //    1. Carrying a flat robot?          Space puts it down. Nothing else
+  //                                       counts, so you can never get stuck.
+  //    2. Empty hands, by a flat robot?   Space lifts it onto your shoulders.
+  //    3. Empty hands, by a potato lying on the floor?   Space picks it up.
+  //    4. Next to a station?              Space uses it — but only if there
+  //                                       is something to do there. If not,
+  //                                       nothing glows and nothing happens.
+  //    5. Holding a potato, with no station near?   Space puts it down on
+  //                                       the floor.
+
+  // How far the chef's feet are from a station.
+  //
+  // Most stations sit against a wall, so this is the gap to the nearest edge
+  // of the station's rectangle. The parts table stands out on the open floor,
+  // so it is measured from one spot instead — the middle of its front edge.
+  Game.prototype.gapTo = function (s) {
+    var chef = this.chef;
+    var nx, ny;
+
+    if (s.type === 'parts') {
+      nx = s.x + s.w / 2;
+      ny = s.y + s.h;
+    } else {
+      nx = Math.max(s.x, Math.min(s.x + s.w, chef.x));
+      ny = Math.max(s.y, Math.min(s.y + s.h, chef.y));
+    }
+
+    var dx = nx - chef.x, dy = ny - chef.y;
+    return Math.sqrt(dx * dx + dy * dy);
+  };
+
+  // How close counts as "close enough" for this station.
+  Game.prototype.reachOf = function (s) {
+    return s.type === 'parts' ? C.PARTS_REACH : C.REACH;
+  };
+
+  // Could Space buy a helper robot right now? Only with completely empty
+  // hands (no potato, no flat robot on your shoulders), enough coins, and
+  // room for another robot. HELPER_MAX of 0 means there is no limit.
+  Game.prototype.canBuyHelper = function () {
+    if (this.holding || this.carryingHelper) return false;
+    if (C.HELPER_MAX > 0 && this.helpers.length >= C.HELPER_MAX) return false;
+    return this.coins >= this.helperCost;
+  };
+
+  // Would Space actually do something at this station, right now?
+  // Each line here matches one of the station rules in useStation() below.
+  Game.prototype.canUse = function (station) {
+    var held = this.holding;
+    if (this.carryingHelper) return false;
+
+    // A bed: only with empty hands, to pull up a potato.
+    if (station.type === 'bed') return held === null;
+
+    // A jar: with any potato that isn't ruined.
+    if (station.type === 'jar') return held !== null && held.doneness !== 'ruined';
+
+    // An oven: put a potato in an empty one, or take one out empty-handed.
+    if (station.type === 'oven') {
+      if (station.potato) return held === null;
+      return held !== null;
+    }
+
+    // The bin: only if there's something to throw away.
+    if (station.type === 'bin') return held !== null;
+
+    // The parts table: only if a robot would really be bought.
+    if (station.type === 'parts') return this.canBuyHelper();
+
+    // A customer: only if you have a potato AND someone is there to take it.
+    // An empty slot, or one whose customer is already leaving, does nothing
+    // — you keep your potato.
+    if (station.type === 'bay') {
+      var customer = this.customers[station.index];
+      return held !== null && customer !== null && customer.state !== 'leaving';
+    }
+
+    return false;
+  };
+
+  // Work out what Space would do right now, and remember it in three places:
+  //
+  //    this.nearestFlat   the flat robot Space would lift
+  //    this.nearestDrop   the potato on the floor Space would pick up
+  //    this.nearest       the station Space is next to
+  //
+  // At most ONE of these is ever set, in the order listed at the top of this
+  // section.
+  Game.prototype.findTarget = function () {
+    var chef = this.chef;
+    var i, gap;
+
+    this.nearestFlat = null;
+    this.nearestDrop = null;
+    this.nearest = null;
+
+    // 1. Carrying a flat robot: Space puts it down, whatever else is near.
+    if (this.carryingHelper) return;
+
+    if (!this.holding) {
+      // 2. A flat robot underfoot. This beats any station, because a robot
+      //    can collapse right on top of one.
+      var flatGap = C.HELPER_PICKUP_REACH;
+      for (i = 0; i < this.helpers.length; i++) {
+        var fh = this.helpers[i];
+        if (fh.state !== 'flat' || fh.carried) continue;
+        gap = Math.sqrt((fh.x - chef.x) * (fh.x - chef.x) + (fh.y - chef.y) * (fh.y - chef.y));
+        if (gap < flatGap) { flatGap = gap; this.nearestFlat = fh; }
+      }
+      if (this.nearestFlat) return;
+
+      // 3. A potato lying on the floor. This beats any station too — so a
+      //    potato can always be picked up again, even one that a robot
+      //    dropped right next to a bed or the bin when it collapsed.
+      var dropGap = C.DROP_REACH;
+      for (i = 0; i < this.dropped.length; i++) {
+        var item = this.dropped[i];
+        gap = Math.sqrt((item.x - chef.x) * (item.x - chef.x) + (item.y - chef.y) * (item.y - chef.y));
+        if (gap < dropGap) { dropGap = gap; this.nearestDrop = item; }
+      }
+      if (this.nearestDrop) return;
+    }
+
+    // 4. The closest station in reach. The parts table only counts when Space
+    //    would really buy a robot. Otherwise it steps aside, and whatever else
+    //    is nearby — or the open floor — gets the press instead.
+    var closestGap = Infinity;
+    for (i = 0; i < this.stations.length; i++) {
+      var s = this.stations[i];
+      if (s.type === 'parts' && !this.canBuyHelper()) continue;
+      gap = this.gapTo(s);
+      if (gap < this.reachOf(s) && gap < closestGap) {
+        closestGap = gap;
+        this.nearest = s;
+      }
+    }
+  };
+
+
+  // ==========================================================================
   //  PRESSING SPACE — the one verb in the game
   // ==========================================================================
   //
-  //  What happens depends entirely on which station the chef is standing next
-  //  to, and whether his hands are full.
+  //  What happens depends entirely on what findTarget() above picked out.
 
   Game.prototype.useStation = function () {
+    // Work the answer out fresh, so Space does exactly what is glowing.
+    this.findTarget();
+
     var station = this.nearest;
     var held = this.holding;
 
@@ -671,36 +889,54 @@
     }
 
     // --- A COLLAPSED ROBOT UNDERFOOT: pick it up ----------------------------
-    // Also beats any station, because a robot can collapse right on top of one.
-    if (!held && this.nearestFlat) {
+    if (this.nearestFlat) {
       this.nearestFlat.carried = true;
       this.carryingHelper = this.nearestFlat;
       this.nearestFlat = null;
       return;
     }
 
-    // --- OPEN FLOOR: put it down, or pick it back up ------------------------
-    // Nothing is in reach, so Space means something different here. A station
-    // always wins over this, which is why a potato can only ever be dropped
-    // out in the open — and so can always be picked up again.
+    // --- A POTATO ON THE FLOOR: pick it back up -----------------------------
+    // With empty hands this beats every station, so a potato on the floor can
+    // always be picked up again, wherever it is lying.
+    if (this.nearestDrop) {
+      this.holding = this.nearestDrop.potato;
+      var at = this.dropped.indexOf(this.nearestDrop);
+      if (at !== -1) this.dropped.splice(at, 1);
+      this.nearestDrop = null;
+      sfx('pickup');
+      return;
+    }
+
+    // --- OPEN FLOOR: put it down --------------------------------------------
+    // No station is in reach, so Space puts down whatever you're holding.
+    // Dropping only ever happens out in the open like this — never next to a
+    // station, where Space means using the station instead.
     if (!station) {
       if (held) {
         this.dropped.push({ potato: held, x: this.chef.x, y: this.chef.y });
         this.holding = null;
         this.puff(this.chef.x, this.chef.y - 6, C.SOIL_PUFF, 4);
         sfx('drop');
-      } else if (this.nearestDrop) {
-        this.holding = this.nearestDrop.potato;
-        var at = this.dropped.indexOf(this.nearestDrop);
-        if (at !== -1) this.dropped.splice(at, 1);
-        this.nearestDrop = null;
-        sfx('pickup');
+      } else if (this.gapTo(this.partsTable) < C.PARTS_REACH &&
+                 (C.HELPER_MAX === 0 || this.helpers.length < C.HELPER_MAX)) {
+        // Empty hands at the parts table, but not enough coins. Nothing is
+        // bought, so nothing glows — but say why, rather than doing nothing
+        // silently.
+        var t = this.partsTable;
+        this.showPopup(t.x + t.w / 2, t.y - 4, this.helperCost + '!', C.BATTERY_LOW_COLOUR);
+        sfx('nope');
       }
       return;
     }
 
-    // --- A GARDEN BED: pull up a raw potato, if hands are empty -------------
-    if (station.type === 'bed' && !held) {
+    // --- NEXT TO A STATION, BUT NOTHING TO DO THERE -------------------------
+    // For example an empty slot in the hatch: nothing happens, and you keep
+    // your potato. canUse() is the same check that decides the glow.
+    if (!this.canUse(station)) return;
+
+    // --- A GARDEN BED: pull up a raw potato ---------------------------------
+    if (station.type === 'bed') {
       this.holding = { size: station.size, colour: 'natural', doneness: 'raw' };
       this.puff(this.chef.x, this.chef.y - 24, C.SOIL_PUFF, 6);
       sfx('dig');
@@ -710,7 +946,7 @@
     // --- A PAINT JAR: dunk whatever we're holding ---------------------------
     // Re-dunking is allowed and simply overwrites the colour, so a wrong dunk
     // costs a walk rather than the whole potato.
-    if (station.type === 'jar' && held && held.doneness !== 'ruined') {
+    if (station.type === 'jar') {
       held.colour = station.colour;
       // Splash from the middle of the jar's opening, whatever size it is.
       this.puff(station.x + station.w / 2, station.y + station.h / 4,
@@ -729,6 +965,9 @@
         sfx('ovenIn');
       } else if (station.potato && !held) {
         station.potato.doneness = this.donenessAt(station.timeIn);
+        // If a helper had abandoned this one, it's yours now — so no helper
+        // will come and take it off you.
+        station.potato.orphaned = false;
         this.holding = station.potato;
         station.potato = null;
         sfx('ovenOut');
@@ -737,7 +976,7 @@
     }
 
     // --- THE BIN: throw it away ---------------------------------------------
-    if (station.type === 'bin' && held) {
+    if (station.type === 'bin') {
       this.holding = null;
       this.puff(station.x + 30, station.y + 14, C.BIN_PUFF, 8);
       sfx('bin');
@@ -745,16 +984,8 @@
     }
 
     // --- THE PARTS TABLE: build a helper robot -------------------------------
+    // canUse() has already checked your hands are empty and you can afford it.
     if (station.type === 'parts') {
-      // HELPER_MAX of 0 means there is no limit.
-      if (C.HELPER_MAX > 0 && this.helpers.length >= C.HELPER_MAX) return;
-      if (this.coins < this.helperCost) {
-        // Can't afford it — say so rather than doing nothing silently.
-        this.showPopup(station.x + station.w / 2, station.y - 4,
-                       this.helperCost + '!', C.BATTERY_LOW_COLOUR);
-        sfx('nope');
-        return;
-      }
       this.coins -= this.helperCost;
       this.spawnHelper();
       this.helperCost = Math.round(this.helperCost * C.HELPER_COST_MULTIPLIER);
@@ -762,7 +993,8 @@
     }
 
     // --- A CUSTOMER: hand it over and find out ------------------------------
-    if (station.type === 'bay' && held) {
+    // canUse() has already checked there's a customer here who isn't leaving.
+    if (station.type === 'bay') {
       this.holding = null;
       this.serveCustomer(station.index, held, station.drawX + C.BAY_WIDTH / 2);
     }
@@ -989,54 +1221,9 @@
       this.helperThink(this.helpers[i], seconds);
     }
 
-    // --- Which station is the chef closest to? ------------------------------
-    var closest = null;
-    var closestDistance = C.REACH;
-    for (i = 0; i < this.stations.length; i++) {
-      var s = this.stations[i];
-      // Find the point on the station's rectangle nearest the chef.
-      var nx = Math.max(s.x, Math.min(s.x + s.w, chef.x));
-      var ny = Math.max(s.y, Math.min(s.y + s.h, chef.y));
-      var distance = Math.sqrt((nx - chef.x) * (nx - chef.x) + (ny - chef.y) * (ny - chef.y));
-      if (distance < closestDistance) {
-        closestDistance = distance;
-        closest = s;
-      }
-    }
-    this.nearest = closest;
-
-    // --- And which dropped potato is underfoot? ------------------------------
-    // Only worth looking if no station is in reach, because a station always
-    // takes priority over a potato on the floor.
-    // --- Is there a collapsed robot underfoot? -------------------------------
-    // A collapsed robot outranks any station — it can drop right on top of one,
-    // and you'd never be able to pick it up again.
-    this.nearestFlat = null;
-    if (!this.carryingHelper && !this.holding) {
-      var flatGap = C.HELPER_PICKUP_REACH;
-      for (i = 0; i < this.helpers.length; i++) {
-        var fh = this.helpers[i];
-        if (fh.state !== 'flat' || fh.carried) continue;
-        var fd = Math.sqrt((fh.x - chef.x) * (fh.x - chef.x) + (fh.y - chef.y) * (fh.y - chef.y));
-        if (fd < flatGap) { flatGap = fd; this.nearestFlat = fh; }
-      }
-    }
-
-    this.nearestDrop = null;
-    if (!closest) {
-      var closestDrop = null;
-      var dropDistance = C.DROP_REACH;
-      for (i = 0; i < this.dropped.length; i++) {
-        var item = this.dropped[i];
-        var gap = Math.sqrt((item.x - chef.x) * (item.x - chef.x) +
-                            (item.y - chef.y) * (item.y - chef.y));
-        if (gap < dropDistance) {
-          dropDistance = gap;
-          closestDrop = item;
-        }
-      }
-      this.nearestDrop = closestDrop;
-    }
+    // --- What would Space do right now? -------------------------------------
+    // Worked out every frame so the right thing glows. See findTarget above.
+    this.findTarget();
   };
 
 
@@ -1322,7 +1509,9 @@
     for (i = 0; i < toDraw.length; i++) toDraw[i][1]();
 
     // --- The pulsing ring around whatever Space will use --------------------
-    if (this.nearest && this.mode === 'play') {
+    // Only drawn when Space would really do something there (canUse), so an
+    // empty hatch slot, or a bed when your hands are full, never glows.
+    if (this.nearest && this.mode === 'play' && this.canUse(this.nearest)) {
       var s = this.nearest;
       var ringHeight = s.type === 'bay' ? C.HATCH_HEIGHT : s.h;
       // For a customer, ring the robot up in the hatch rather than the
@@ -1351,6 +1540,17 @@
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.ellipse(drop.x, drop.y, 20, 8, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // --- The ring around a flat robot he's standing over and could lift ------
+    if (this.nearestFlat && this.mode === 'play') {
+      var flat = this.nearestFlat;
+      var flatPulse = 0.6 + 0.4 * Math.sin(performance.now() / 150);
+      ctx.strokeStyle = 'rgba(' + C.HIGHLIGHT + ',' + flatPulse + ')';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.ellipse(flat.x, flat.y - 1, 24, 9, 0, 0, Math.PI * 2);
       ctx.stroke();
     }
 
@@ -1443,6 +1643,12 @@
         var z = this.stations[i];
         ctx.strokeRect(z.x, z.y, z.w, z.h);
       }
+      // The parts table is used from one spot at its front, not from its
+      // outline, so its circle shows where your feet need to be.
+      var pt = this.partsTable;
+      ctx.beginPath();
+      ctx.arc(pt.x + pt.w / 2, pt.y + pt.h, C.PARTS_REACH, 0, Math.PI * 2);
+      ctx.stroke();
       ctx.setLineDash([]);
     }
 
@@ -1508,10 +1714,12 @@
     ctx.textAlign = 'center';
 
     var self = this;
+    // The last number given to fillText is the widest a line may be. A line
+    // longer than that is squeezed to fit rather than running off the edge.
     var line = function (text, y, size, colour) {
       ctx.font = size + 'px ' + C.FONT;
       ctx.fillStyle = colour || '#fbf7ee';
-      ctx.fillText(text, C.WIDTH / 2, y);
+      ctx.fillText(text, C.WIDTH / 2, y, C.WIDTH - 40);
     };
 
     if (this.mode === 'title') {
@@ -1519,7 +1727,9 @@
       line(C.TITLE_HINT, 262, 20);
       line(C.TITLE_CONTROLS, 292, 14, '#d9d2c2');
       line(C.TITLE_BATTERY, 314, 13, '#f2c230');
-      line(C.TITLE_MUTE, 336, 12, '#9a9086');
+      line(C.TITLE_HELPERS, 338, 12, '#d9d2c2');
+      line(C.TITLE_FLAT, 358, 12, '#d9d2c2');
+      line(C.TITLE_MUTE, 384, 12, '#9a9086');
     }
 
     if (this.mode === 'paused') {
