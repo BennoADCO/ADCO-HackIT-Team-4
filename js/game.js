@@ -116,11 +116,37 @@
   //  Starting (or restarting) a round
   // --------------------------------------------------------------------------
 
-  Game.prototype.reset = function () {
-    var self = this;
+  // One chef — one player's robot. Everything that belongs to ONE player
+  // lives in here; everything the two players share (coins, lives, the
+  // kitchen itself) lives on the game.
+  function makeChef(number, label, x, y, colour, keys) {
+    return {
+      isChef: true,
+      number: number,         // 1 or 2 — the label drawn over its head
+      label: label,           // 'P1' or 'P2' — by its battery in the corner
+      colour: colour,         // its ring, label, battery label and glow
+      keys: keys,             // which keys drive it (from config.js)
+      x: x, y: y,             // where its FEET are
+      walkPhase: 0,           // the little bob while walking
+      holding: null,          // the potato in its hands, or null
+      carrying: null,         // a flat robot (helper or chef) on its shoulders
+      battery: 100,           // percent full. Always starts topped up.
+      charging: false,        // is it standing on the pad this instant?
+      lowBeep: 0,             // countdown to the next flat-battery nag
+      chargeBeep: 0,          // countdown to the next charging shimmer
+      flat: false,            // battery ran out: collapsed, keys do nothing
+      carried: false,         // being carried by the other chef right now
+      // What this chef's action key would do right now (see findTarget).
+      nearest: null, nearestDrop: null, nearestFlat: null
+    };
+  }
 
-    this.chef = { x: C.CHEF_START_X, y: C.CHEF_START_Y, walkPhase: 0 };
-    this.holding = null;         // the potato in the chef's hands, or null
+  Game.prototype.reset = function () {
+    // The two chefs, one per player.
+    this.chefs = [
+      makeChef(1, C.HUD_P1, C.P1_START_X, C.P1_START_Y, C.P1_COLOUR, C.P1_KEYS),
+      makeChef(2, C.HUD_P2, C.P2_START_X, C.P2_START_Y, C.P2_COLOUR, C.P2_KEYS)
+    ];
     this.dropped = [];           // potatoes left lying on the kitchen floor
 
     // The two ovens.
@@ -148,7 +174,7 @@
     this.bin = { type: 'bin', x: C.BIN_X, y: C.BIN_Y, w: C.BIN_WIDTH, h: C.BIN_HEIGHT };
 
     // The charging pad. Note it is deliberately NOT in the station list below —
-    // you don't press Space to use it, you just walk onto it.
+    // you don't press a key to use it, you just walk onto it.
     this.charger = { x: C.CHARGER_X, y: C.CHARGER_Y,
                      w: C.CHARGER_WIDTH, h: C.CHARGER_HEIGHT };
 
@@ -182,8 +208,6 @@
     // survive a restart, so run two is never easier than run one.
     this.helpers = [];
     this.helperCost = C.HELPER_FIRST_COST;
-    this.carryingHelper = null;   // a collapsed robot the player is carrying
-    this.nearestFlat = null;      // a collapsed robot within pickup range
 
     this.stations = this.beds.concat(this.jars, [this.bin], this.ovens,
                                      [this.partsTable], this.bays);
@@ -193,18 +217,12 @@
     var self2 = this;
     this.stations.forEach(function (s) { s.spot = self2.standingSpot(s); });
 
-    this.coins = 0;
-    this.strikes = 0;
-    this.battery = 100;          // percent full. Always starts topped up.
-    this.charging = false;       // is he standing on the pad this instant?
-    this.lowBeep = 0;            // countdown to the next flat-battery nag
-    this.chargeBeep = 0;         // countdown to the next charging shimmer
+    this.coins = 0;              // shared by both players — this is the score
+    this.strikes = 0;            // shared too
     this.overReason = 'strikes'; // why the last round ended
     this.elapsed = 0;
     this.untilNextCustomer = 0.6;
     this.ordersMade = 0;
-    this.nearest = null;
-    this.nearestDrop = null;
 
     this.puffs = [];        // little dust and steam dots
     this.popups = [];       // the "+20" numbers that float up
@@ -551,24 +569,77 @@
   //  The battery
   // --------------------------------------------------------------------------
 
-  // How fast the chef walks right now. A full battery is full speed; a flat
+  // How fast a chef walks right now. A full battery is full speed; a flat
   // one is BATTERY_SLOWEST of that. It slides smoothly between the two, so
   // you feel yourself getting sluggish long before you actually run out.
-  Game.prototype.currentSpeed = function () {
-    var charge = Math.max(0, Math.min(1, this.battery / 100));
+  Game.prototype.currentSpeed = function (chef) {
+    var charge = Math.max(0, Math.min(1, chef.battery / 100));
     return C.CHEF_SPEED * (C.BATTERY_SLOWEST + (1 - C.BATTERY_SLOWEST) * charge);
   };
 
-  // Is he standing close enough to the base of the charging pad?
+  // Is this chef standing close enough to the base of the charging pad?
   // This is measured as a circle around the bottom of the pad rather than the
-  // whole rectangle, so he charges when he's standing AT it, not behind it.
-  Game.prototype.onCharger = function () {
+  // whole rectangle, so it charges when it's standing AT it, not behind it.
+  Game.prototype.onCharger = function (chef) {
     var pad = this.charger;
     var padX = pad.x + pad.w / 2;
     var padY = pad.y + pad.h - 6;
-    var dx = this.chef.x - padX;
-    var dy = this.chef.y - padY;
+    var dx = chef.x - padX;
+    var dy = chef.y - padY;
     return Math.sqrt(dx * dx + dy * dy) < C.CHARGER_GRIP;
+  };
+
+  // Is this robot — a helper or a chef — lying flat, waiting to be carried?
+  function isFlat(robot) {
+    return robot.isChef ? robot.flat : robot.state === 'flat';
+  }
+
+  // A chef's battery has run out. Just like a helper, it drops whatever it
+  // had in its hands and lies there until the OTHER chef carries it to the
+  // charging pad. If both chefs are flat at once, the round is over.
+  Game.prototype.chefCollapse = function (chef) {
+    chef.battery = 0;
+    chef.flat = true;
+    chef.walkPhase = 0;
+
+    if (chef.holding) {
+      this.dropped.push({ potato: chef.holding, x: chef.x, y: chef.y });
+      chef.holding = null;
+    }
+    // Anything on its shoulders is put down where it fell — still flat.
+    if (chef.carrying) {
+      chef.carrying.carried = false;
+      chef.carrying.x = chef.x;
+      chef.carrying.y = chef.y;
+      chef.carrying = null;
+    }
+
+    this.puff(chef.x, chef.y - 20, '#8a7f78', 10);
+    sfx('powerDown');
+
+    var allFlat = true;
+    for (var i = 0; i < this.chefs.length; i++) {
+      if (!this.chefs[i].flat) allFlat = false;
+    }
+    if (allFlat) this.endRound('battery');
+  };
+
+  // A chef has carried a flat robot — a helper or the other chef — onto the
+  // charging pad. It wakes up with a full battery, standing just in front.
+  Game.prototype.revive = function (robot) {
+    robot.battery = 100;
+    robot.carried = false;
+    robot.x = this.charger.x + this.charger.w / 2;
+    robot.y = this.charger.y + this.charger.h + 14;
+
+    if (robot.isChef) {
+      robot.flat = false;
+      robot.walkPhase = 0;
+    } else {
+      robot.state = 'idle';
+      robot.pause = 0.4;
+    }
+    this.puff(robot.x, robot.y - 20, C.CHARGE_SPARK, 14);
   };
 
 
@@ -716,33 +787,38 @@
 
 
   // ==========================================================================
-  //  WHAT WILL SPACE DO? — worked out fresh every frame
+  //  WHAT WILL THE ACTION KEY DO? — worked out fresh every frame, per chef
   // ==========================================================================
   //
-  //  Space does exactly one thing, and it is always the thing that is
-  //  glowing. This section decides what that thing is. The drawing code puts
-  //  a ring round it, and useStation() below does it. Both read the same
-  //  answer, so the glow and the Space bar can never disagree.
+  //  Each player's action key (E for player 1, 7 for player 2) does exactly
+  //  one thing, and it is always the thing glowing in that player's colour.
+  //  This section decides what that thing is, separately for each chef. The
+  //  drawing code puts a ring round it, and useStation() below does it. Both
+  //  read the same answer, so the glow and the key can never disagree.
+  //
+  //  Each chef's answer depends only on where THAT chef is and what it is
+  //  holding — never on what the other player just pressed.
   //
   //  Things are checked in this order, and the first match wins:
   //
-  //    1. Carrying a flat robot?          Space puts it down. Nothing else
+  //    1. Flat, or being carried?         The key does nothing at all.
+  //    2. Carrying a flat robot?          The key puts it down. Nothing else
   //                                       counts, so you can never get stuck.
-  //    2. Empty hands, by a flat robot?   Space lifts it onto your shoulders.
-  //    3. Empty hands, by a potato lying on the floor?   Space picks it up.
-  //    4. Next to a station?              Space uses it — but only if there
+  //    3. Empty hands, by a flat robot (a helper, or the other chef)?
+  //                                       The key lifts it onto your shoulders.
+  //    4. Empty hands, by a potato lying on the floor?   The key picks it up.
+  //    5. Next to a station?              The key uses it — but only if there
   //                                       is something to do there. If not,
   //                                       nothing glows and nothing happens.
-  //    5. Holding a potato, with no station near?   Space puts it down on
+  //    6. Holding a potato, with no station near?   The key puts it down on
   //                                       the floor.
 
-  // How far the chef's feet are from a station.
+  // How far a chef's feet are from a station.
   //
   // Most stations sit against a wall, so this is the gap to the nearest edge
   // of the station's rectangle. The parts table stands out on the open floor,
   // so it is measured from one spot instead — the middle of its front edge.
-  Game.prototype.gapTo = function (s) {
-    var chef = this.chef;
+  Game.prototype.gapTo = function (chef, s) {
     var nx, ny;
 
     if (s.type === 'parts') {
@@ -762,20 +838,21 @@
     return s.type === 'parts' ? C.PARTS_REACH : C.REACH;
   };
 
-  // Could Space buy a helper robot right now? Only with completely empty
-  // hands (no potato, no flat robot on your shoulders), enough coins, and
-  // room for another robot. HELPER_MAX of 0 means there is no limit.
-  Game.prototype.canBuyHelper = function () {
-    if (this.holding || this.carryingHelper) return false;
+  // Could this chef's action key buy a helper robot right now? Only with
+  // completely empty hands (no potato, no flat robot on its shoulders),
+  // enough coins, and room for another robot. HELPER_MAX of 0 means no limit.
+  Game.prototype.canBuyHelper = function (chef) {
+    if (chef.flat || chef.holding || chef.carrying) return false;
     if (C.HELPER_MAX > 0 && this.helpers.length >= C.HELPER_MAX) return false;
     return this.coins >= this.helperCost;
   };
 
-  // Would Space actually do something at this station, right now?
-  // Each line here matches one of the station rules in useStation() below.
-  Game.prototype.canUse = function (station) {
-    var held = this.holding;
-    if (this.carryingHelper) return false;
+  // Would this chef's action key actually do something at this station,
+  // right now? Each line here matches one of the station rules in
+  // useStation() below.
+  Game.prototype.canUse = function (chef, station) {
+    var held = chef.holding;
+    if (chef.flat || chef.carrying) return false;
 
     // A bed: only with empty hands, to pull up a potato.
     if (station.type === 'bed') return held === null;
@@ -793,7 +870,7 @@
     if (station.type === 'bin') return held !== null;
 
     // The parts table: only if a robot would really be bought.
-    if (station.type === 'parts') return this.canBuyHelper();
+    if (station.type === 'parts') return this.canBuyHelper(chef);
 
     // A customer: only if you have a potato AND someone is there to take it.
     // An empty slot, or one whose customer is already leaving, does nothing
@@ -806,119 +883,128 @@
     return false;
   };
 
-  // Work out what Space would do right now, and remember it in three places:
+  // Work out what this chef's action key would do right now, and remember it
+  // on the chef in three places:
   //
-  //    this.nearestFlat   the flat robot Space would lift
-  //    this.nearestDrop   the potato on the floor Space would pick up
-  //    this.nearest       the station Space is next to
+  //    chef.nearestFlat   the flat robot the key would lift
+  //    chef.nearestDrop   the potato on the floor the key would pick up
+  //    chef.nearest       the station the chef is next to
   //
   // At most ONE of these is ever set, in the order listed at the top of this
   // section.
-  Game.prototype.findTarget = function () {
-    var chef = this.chef;
+  Game.prototype.findTarget = function (chef) {
     var i, gap;
 
-    this.nearestFlat = null;
-    this.nearestDrop = null;
-    this.nearest = null;
+    chef.nearestFlat = null;
+    chef.nearestDrop = null;
+    chef.nearest = null;
 
-    // 1. Carrying a flat robot: Space puts it down, whatever else is near.
-    if (this.carryingHelper) return;
+    // 1. Flat or being carried: this player can't do anything.
+    if (chef.flat) return;
 
-    if (!this.holding) {
-      // 2. A flat robot underfoot. This beats any station, because a robot
-      //    can collapse right on top of one.
+    // 2. Carrying a flat robot: the key puts it down, whatever else is near.
+    if (chef.carrying) return;
+
+    if (!chef.holding) {
+      // 3. A flat robot underfoot — a helper, or the other chef. This beats
+      //    any station, because a robot can collapse right on top of one.
       var flatGap = C.HELPER_PICKUP_REACH;
-      for (i = 0; i < this.helpers.length; i++) {
-        var fh = this.helpers[i];
-        if (fh.state !== 'flat' || fh.carried) continue;
-        gap = Math.sqrt((fh.x - chef.x) * (fh.x - chef.x) + (fh.y - chef.y) * (fh.y - chef.y));
-        if (gap < flatGap) { flatGap = gap; this.nearestFlat = fh; }
+      var flatOnes = this.helpers.concat(this.chefs);
+      for (i = 0; i < flatOnes.length; i++) {
+        var fr = flatOnes[i];
+        if (fr === chef || !isFlat(fr) || fr.carried) continue;
+        gap = Math.sqrt((fr.x - chef.x) * (fr.x - chef.x) + (fr.y - chef.y) * (fr.y - chef.y));
+        if (gap < flatGap) { flatGap = gap; chef.nearestFlat = fr; }
       }
-      if (this.nearestFlat) return;
+      if (chef.nearestFlat) return;
 
-      // 3. A potato lying on the floor. This beats any station too — so a
+      // 4. A potato lying on the floor. This beats any station too — so a
       //    potato can always be picked up again, even one that a robot
       //    dropped right next to a bed or the bin when it collapsed.
       var dropGap = C.DROP_REACH;
       for (i = 0; i < this.dropped.length; i++) {
         var item = this.dropped[i];
         gap = Math.sqrt((item.x - chef.x) * (item.x - chef.x) + (item.y - chef.y) * (item.y - chef.y));
-        if (gap < dropGap) { dropGap = gap; this.nearestDrop = item; }
+        if (gap < dropGap) { dropGap = gap; chef.nearestDrop = item; }
       }
-      if (this.nearestDrop) return;
+      if (chef.nearestDrop) return;
     }
 
-    // 4. The closest station in reach. The parts table only counts when Space
-    //    would really buy a robot. Otherwise it steps aside, and whatever else
-    //    is nearby — or the open floor — gets the press instead.
+    // 5. The closest station in reach. The parts table only counts when the
+    //    key would really buy a robot. Otherwise it steps aside, and whatever
+    //    else is nearby — or the open floor — gets the press instead.
     var closestGap = Infinity;
     for (i = 0; i < this.stations.length; i++) {
       var s = this.stations[i];
-      if (s.type === 'parts' && !this.canBuyHelper()) continue;
-      gap = this.gapTo(s);
+      if (s.type === 'parts' && !this.canBuyHelper(chef)) continue;
+      gap = this.gapTo(chef, s);
       if (gap < this.reachOf(s) && gap < closestGap) {
         closestGap = gap;
-        this.nearest = s;
+        chef.nearest = s;
       }
     }
   };
 
 
   // ==========================================================================
-  //  PRESSING SPACE — the one verb in the game
+  //  PRESSING THE ACTION KEY — the one verb in the game
   // ==========================================================================
   //
-  //  What happens depends entirely on what findTarget() above picked out.
+  //  What happens depends entirely on what findTarget() above picked out for
+  //  this chef.
 
-  Game.prototype.useStation = function () {
-    // Work the answer out fresh, so Space does exactly what is glowing.
-    this.findTarget();
+  Game.prototype.useStation = function (chef) {
+    // A flat chef, or one being carried, can't do anything.
+    if (chef.flat) return;
 
-    var station = this.nearest;
-    var held = this.holding;
+    // Work the answer out fresh, so the key does exactly what is glowing.
+    this.findTarget(chef);
+
+    var station = chef.nearest;
+    var held = chef.holding;
 
     // --- CARRYING A COLLAPSED ROBOT: put it down ----------------------------
     // This beats everything, so you can never get stuck holding one.
-    if (this.carryingHelper) {
-      this.carryingHelper.carried = false;
-      this.carryingHelper.x = this.chef.x;
-      this.carryingHelper.y = this.chef.y;
-      this.carryingHelper = null;
+    if (chef.carrying) {
+      chef.carrying.carried = false;
+      chef.carrying.x = chef.x;
+      chef.carrying.y = chef.y;
+      chef.carrying = null;
       return;
     }
 
     // --- A COLLAPSED ROBOT UNDERFOOT: pick it up ----------------------------
-    if (this.nearestFlat) {
-      this.nearestFlat.carried = true;
-      this.carryingHelper = this.nearestFlat;
-      this.nearestFlat = null;
+    // A flat helper, or the other chef when its battery has run out.
+    if (chef.nearestFlat) {
+      chef.nearestFlat.carried = true;
+      chef.carrying = chef.nearestFlat;
+      chef.nearestFlat = null;
       return;
     }
 
     // --- A POTATO ON THE FLOOR: pick it back up -----------------------------
     // With empty hands this beats every station, so a potato on the floor can
     // always be picked up again, wherever it is lying.
-    if (this.nearestDrop) {
-      this.holding = this.nearestDrop.potato;
-      var at = this.dropped.indexOf(this.nearestDrop);
+    if (chef.nearestDrop) {
+      chef.holding = chef.nearestDrop.potato;
+      var at = this.dropped.indexOf(chef.nearestDrop);
       if (at !== -1) this.dropped.splice(at, 1);
-      this.nearestDrop = null;
+      chef.nearestDrop = null;
       sfx('pickup');
       return;
     }
 
     // --- OPEN FLOOR: put it down --------------------------------------------
-    // No station is in reach, so Space puts down whatever you're holding.
+    // No station is in reach, so the key puts down whatever you're holding.
     // Dropping only ever happens out in the open like this — never next to a
-    // station, where Space means using the station instead.
+    // station, where the key means using the station instead.
     if (!station) {
       if (held) {
-        this.dropped.push({ potato: held, x: this.chef.x, y: this.chef.y });
-        this.holding = null;
-        this.puff(this.chef.x, this.chef.y - 6, C.SOIL_PUFF, 4);
+        this.dropped.push({ potato: held, x: chef.x, y: chef.y });
+        chef.holding = null;
+        this.puff(chef.x, chef.y - 6, C.SOIL_PUFF, 4);
         sfx('drop');
-      } else if (this.gapTo(this.partsTable) < C.PARTS_REACH &&
+      } else if (this.gapTo(chef, this.partsTable) < C.PARTS_REACH &&
                  (C.HELPER_MAX === 0 || this.helpers.length < C.HELPER_MAX)) {
         // Empty hands at the parts table, but not enough coins. Nothing is
         // bought, so nothing glows — but say why, rather than doing nothing
@@ -933,12 +1019,12 @@
     // --- NEXT TO A STATION, BUT NOTHING TO DO THERE -------------------------
     // For example an empty slot in the hatch: nothing happens, and you keep
     // your potato. canUse() is the same check that decides the glow.
-    if (!this.canUse(station)) return;
+    if (!this.canUse(chef, station)) return;
 
     // --- A GARDEN BED: pull up a raw potato ---------------------------------
     if (station.type === 'bed') {
-      this.holding = { size: station.size, colour: 'natural', doneness: 'raw' };
-      this.puff(this.chef.x, this.chef.y - 24, C.SOIL_PUFF, 6);
+      chef.holding = { size: station.size, colour: 'natural', doneness: 'raw' };
+      this.puff(chef.x, chef.y - 24, C.SOIL_PUFF, 6);
       sfx('dig');
       return;
     }
@@ -961,14 +1047,14 @@
         station.potato = held;
         station.timeIn = this.timerForDoneness(held.doneness);
         station.lastDoneness = this.donenessAt(station.timeIn);
-        this.holding = null;
+        chef.holding = null;
         sfx('ovenIn');
       } else if (station.potato && !held) {
         station.potato.doneness = this.donenessAt(station.timeIn);
         // If a helper had abandoned this one, it's yours now — so no helper
         // will come and take it off you.
         station.potato.orphaned = false;
-        this.holding = station.potato;
+        chef.holding = station.potato;
         station.potato = null;
         sfx('ovenOut');
       }
@@ -977,7 +1063,7 @@
 
     // --- THE BIN: throw it away ---------------------------------------------
     if (station.type === 'bin') {
-      this.holding = null;
+      chef.holding = null;
       this.puff(station.x + 30, station.y + 14, C.BIN_PUFF, 8);
       sfx('bin');
       return;
@@ -995,7 +1081,7 @@
     // --- A CUSTOMER: hand it over and find out ------------------------------
     // canUse() has already checked there's a customer here who isn't leaving.
     if (station.type === 'bay') {
-      this.holding = null;
+      chef.holding = null;
       this.serveCustomer(station.index, held, station.drawX + C.BAY_WIDTH / 2);
     }
   };
@@ -1039,6 +1125,106 @@
   //  moves is multiplied by it, so the game runs at the same speed on a fast
   //  machine and a slow one.
 
+  // Is any of this list of keys being held down right now?
+  Game.prototype.anyHeld = function (codes) {
+    for (var i = 0; i < codes.length; i++) {
+      if (this.keysHeld[codes[i]]) return true;
+    }
+    return false;
+  };
+
+  // One chef's turn: walk it with its own keys, then charge or drain its own
+  // battery. A flat chef does nothing at all until it's carried to the pad.
+  Game.prototype.updateChef = function (chef, seconds) {
+    if (chef.flat) {
+      // Being carried: ride along on the other chef's shoulders.
+      chef.charging = false;
+      return;
+    }
+
+    // --- Walking ------------------------------------------------------------
+    var dx = 0, dy = 0;
+    if (this.anyHeld(chef.keys.left)) dx--;
+    if (this.anyHeld(chef.keys.right)) dx++;
+    if (this.anyHeld(chef.keys.up)) dy--;
+    if (this.anyHeld(chef.keys.down)) dy++;
+
+    var speed = this.currentSpeed(chef);
+    if (dx || dy) {
+      // Divide by the diagonal length so walking diagonally isn't faster.
+      var length = Math.sqrt(dx * dx + dy * dy);
+      chef.x += (dx / length) * speed * seconds;
+      chef.y += (dy / length) * speed * seconds;
+      // A flat battery shuffles instead of striding.
+      chef.walkPhase += seconds * 14 * (speed / C.CHEF_SPEED);
+    } else {
+      chef.walkPhase = 0;
+    }
+
+    // Keep its feet inside the walkable box. The two chefs don't bump into
+    // each other — they can walk straight through one another.
+    chef.x = Math.max(C.WALK_LEFT, Math.min(C.WALK_RIGHT, chef.x));
+    chef.y = Math.max(C.WALK_TOP, Math.min(C.WALK_BOTTOM, chef.y));
+
+    // --- The battery --------------------------------------------------------
+    // Standing on the pad fills it quickly. Everything else drains it slowly.
+    chef.charging = this.onCharger(chef);
+
+    // A robot you're carrying — a helper or the other chef — rides along on
+    // your shoulders, and wakes up the moment you step onto the pad.
+    if (chef.carrying) {
+      chef.carrying.x = chef.x;
+      chef.carrying.y = chef.y;
+      if (chef.charging) {
+        this.revive(chef.carrying);
+        chef.carrying = null;
+      }
+    }
+
+    if (chef.charging) {
+      chef.battery = Math.min(100, chef.battery + C.BATTERY_RECHARGE_RATE * seconds);
+
+      // Sparks, so it is obvious something is happening.
+      if (Math.random() < seconds * 20) {
+        var pad = this.charger;
+        this.puffs.push({
+          x: pad.x + pad.w / 2 + (Math.random() - 0.5) * pad.w,
+          y: pad.y + pad.h - 10,
+          vx: (Math.random() - 0.5) * 70,
+          vy: -50 - Math.random() * 50,
+          life: 0.4, lifeMax: 0.4,
+          radius: 1.5 + Math.random() * 2,
+          colour: C.CHARGE_SPARK
+        });
+      }
+
+      // A shimmer that climbs in pitch as the battery fills.
+      chef.chargeBeep -= seconds;
+      if (chef.chargeBeep <= 0) {
+        chef.chargeBeep = 0.09;
+        sfx('charge', { pitch: chef.battery / 100 });
+      }
+    } else {
+      chef.battery -= (100 / C.BATTERY_LASTS) * seconds;
+      if (chef.battery <= 0) {
+        this.chefCollapse(chef);
+        return;
+      }
+
+      // Nag once a second while the battery is nearly flat. You are usually
+      // looking somewhere else entirely when this matters.
+      if (chef.battery <= C.BATTERY_LOW_AT) {
+        chef.lowBeep -= seconds;
+        if (chef.lowBeep <= 0) {
+          chef.lowBeep = 1;
+          sfx('batteryLow');
+        }
+      } else {
+        chef.lowBeep = 0;
+      }
+    }
+  };
+
   Game.prototype.update = function (seconds) {
     // Dust and steam keep drifting even when paused — it looks better.
     var i;
@@ -1060,95 +1246,12 @@
 
     this.elapsed += seconds;
 
-    // --- Walking ------------------------------------------------------------
-    var dx = 0, dy = 0;
-    if (this.keysHeld['arrowleft'] || this.keysHeld['a']) dx--;
-    if (this.keysHeld['arrowright'] || this.keysHeld['d']) dx++;
-    if (this.keysHeld['arrowup'] || this.keysHeld['w']) dy--;
-    if (this.keysHeld['arrowdown'] || this.keysHeld['s']) dy++;
-
-    var chef = this.chef;
-    var speed = this.currentSpeed();
-    if (dx || dy) {
-      // Divide by the diagonal length so walking diagonally isn't faster.
-      var length = Math.sqrt(dx * dx + dy * dy);
-      chef.x += (dx / length) * speed * seconds;
-      chef.y += (dy / length) * speed * seconds;
-      // A flat battery shuffles instead of striding.
-      chef.walkPhase += seconds * 14 * (speed / C.CHEF_SPEED);
-    } else {
-      chef.walkPhase = 0;
+    // --- The two chefs: walking and batteries --------------------------------
+    for (i = 0; i < this.chefs.length; i++) {
+      this.updateChef(this.chefs[i], seconds);
     }
-
-    // Keep his feet inside the walkable box.
-    chef.x = Math.max(C.WALK_LEFT, Math.min(C.WALK_RIGHT, chef.x));
-    chef.y = Math.max(C.WALK_TOP, Math.min(C.WALK_BOTTOM, chef.y));
-
-    // --- The battery --------------------------------------------------------
-    // Standing on the pad fills it quickly. Everything else drains it slowly.
-    this.charging = this.onCharger();
-
-    // A robot you're carrying rides along on your shoulders, and wakes up the
-    // moment you step onto the pad.
-    if (this.carryingHelper) {
-      this.carryingHelper.x = chef.x;
-      this.carryingHelper.y = chef.y;
-      if (this.charging) {
-        var revived = this.carryingHelper;
-        revived.battery = 100;
-        revived.carried = false;
-        revived.state = 'idle';
-        revived.pause = 0.4;
-        revived.x = this.charger.x + this.charger.w / 2;
-        revived.y = this.charger.y + this.charger.h + 14;
-        this.carryingHelper = null;
-        this.puff(revived.x, revived.y - 20, C.CHARGE_SPARK, 14);
-      }
-    }
-
-    if (this.charging) {
-      this.battery = Math.min(100, this.battery + C.BATTERY_RECHARGE_RATE * seconds);
-
-      // Sparks, so it is obvious something is happening.
-      if (Math.random() < seconds * 20) {
-        var pad = this.charger;
-        this.puffs.push({
-          x: pad.x + pad.w / 2 + (Math.random() - 0.5) * pad.w,
-          y: pad.y + pad.h - 10,
-          vx: (Math.random() - 0.5) * 70,
-          vy: -50 - Math.random() * 50,
-          life: 0.4, lifeMax: 0.4,
-          radius: 1.5 + Math.random() * 2,
-          colour: C.CHARGE_SPARK
-        });
-      }
-
-      // A shimmer that climbs in pitch as the battery fills.
-      this.chargeBeep -= seconds;
-      if (this.chargeBeep <= 0) {
-        this.chargeBeep = 0.09;
-        sfx('charge', { pitch: this.battery / 100 });
-      }
-    } else {
-      this.battery -= (100 / C.BATTERY_LASTS) * seconds;
-      if (this.battery <= 0) {
-        this.battery = 0;
-        this.endRound('battery');
-        return;
-      }
-
-      // Nag once a second while the battery is nearly flat. You are usually
-      // looking somewhere else entirely when this matters.
-      if (this.battery <= C.BATTERY_LOW_AT) {
-        this.lowBeep -= seconds;
-        if (this.lowBeep <= 0) {
-          this.lowBeep = 1;
-          sfx('batteryLow');
-        }
-      } else {
-        this.lowBeep = 0;
-      }
-    }
+    // Both chefs flat at once ends the round there and then.
+    if (this.mode !== 'play') return;
 
     // --- Ovens cooking ------------------------------------------------------
     for (i = 0; i < this.ovens.length; i++) {
@@ -1221,9 +1324,11 @@
       this.helperThink(this.helpers[i], seconds);
     }
 
-    // --- What would Space do right now? -------------------------------------
+    // --- What would each player's action key do right now? ------------------
     // Worked out every frame so the right thing glows. See findTarget above.
-    this.findTarget();
+    for (i = 0; i < this.chefs.length; i++) {
+      this.findTarget(this.chefs[i]);
+    }
   };
 
 
@@ -1271,14 +1376,12 @@
     }
   };
 
-  // The yellow battery bar that floats above the chef's head.
-  // It turns red and flashes once the battery is nearly flat, which is the
-  // only warning you get before the round ends.
-  // 'charge' and 'barWidth' are optional — left out, it draws the player's own
-  // battery at full size, which is what the chef uses.
+  // A yellow battery bar — over a chef's or helper's head, or up in the top
+  // corner. It turns red and flashes once the battery is nearly flat, which
+  // is the only warning you get before that robot collapses.
+  // 'barWidth' is optional — left out, it's the size drawn over a chef.
   Game.prototype.drawBatteryBar = function (centreX, y, charge, barWidth) {
     var ctx = this.ctx;
-    if (charge === undefined) charge = this.battery;
     var width = barWidth || 34, height = 5;
     var left = centreX - width / 2;
     var filled = Math.max(0, Math.min(1, charge / 100));
@@ -1466,12 +1569,13 @@
       }]);
     });
 
-    // The charging pad. It glows while the chef is topping up.
+    // The charging pad. It glows while either chef is topping up.
     toDraw.push([this.charger.y + this.charger.h, function () {
       var pad = self.charger;
       self.shadow(pad.x + pad.w / 2, pad.y + pad.h - 5, pad.w * 0.5, 7);
 
-      if (self.charging) {
+      var anyCharging = self.chefs.some(function (c) { return c.charging; });
+      if (anyCharging) {
         var halo = 0.25 + 0.2 * Math.sin(performance.now() / 90);
         ctx.fillStyle = 'rgba(255,230,120,' + halo + ')';
         ctx.beginPath();
@@ -1482,76 +1586,21 @@
       self.picture('charging_station', pad.x, pad.y, pad.w, pad.h);
     }]);
 
-    var chef = this.chef;
-    toDraw.push([chef.y, function () {
-      var bob = chef.walkPhase ? -Math.abs(Math.sin(chef.walkPhase)) * 2.5 : 0;
-      self.shadow(chef.x, chef.y - 1, 18, 5);
-      self.picture('chef_robot',
-                   chef.x - C.CHEF_WIDTH / 2, chef.y - C.CHEF_HEIGHT + bob,
-                   C.CHEF_WIDTH, C.CHEF_HEIGHT);
-      if (self.holding) {
-        self.drawPotato(self.holding, chef.x, chef.y - 24 + bob, C.POTATO_IN_HANDS);
-      }
-      // A collapsed robot slung over his shoulders.
-      if (self.carryingHelper) {
-        var cw = C.CHEF_WIDTH * C.HELPER_SCALE * 0.8;
-        var cht = C.CHEF_HEIGHT * C.HELPER_SCALE * 0.8;
-        ctx.save();
-        ctx.translate(chef.x, chef.y - C.CHEF_HEIGHT - 6 + bob);
-        ctx.rotate(Math.PI / 2);
-        self.picture('chef_robot', -cw / 2, -cht / 2, cw, cht);
-        ctx.restore();
-      }
-      self.drawBatteryBar(chef.x, chef.y - C.CHEF_HEIGHT - 9 + bob);
-    }]);
+    // The two chefs, each sorted into the scene by how far down it is.
+    this.chefs.forEach(function (chef) {
+      // A chef being carried is drawn on the other chef's shoulders instead.
+      if (chef.carried) return;
+      toDraw.push([chef.y, function () { self.drawChef(chef); }]);
+    });
 
     toDraw.sort(function (a, b) { return a[0] - b[0]; });
     for (i = 0; i < toDraw.length; i++) toDraw[i][1]();
 
-    // --- The pulsing ring around whatever Space will use --------------------
-    // Only drawn when Space would really do something there (canUse), so an
-    // empty hatch slot, or a bed when your hands are full, never glows.
-    if (this.nearest && this.mode === 'play' && this.canUse(this.nearest)) {
-      var s = this.nearest;
-      var ringHeight = s.type === 'bay' ? C.HATCH_HEIGHT : s.h;
-      // For a customer, ring the robot up in the hatch rather than the
-      // invisible patch of floor you're standing on.
-      var ringX = s.type === 'bay' ? s.drawX : s.x;
-      var ringW = s.type === 'bay' ? C.BAY_WIDTH : s.w;
-      var pulse = 0.6 + 0.4 * Math.sin(performance.now() / 150);
-      ctx.strokeStyle = 'rgba(' + C.HIGHLIGHT + ',' + pulse + ')';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      if (ctx.roundRect) {
-        ctx.roundRect(ringX - 2, s.y - 2, ringW + 4, ringHeight + 4, 10);
-      } else {
-        ctx.rect(ringX - 2, s.y - 2, ringW + 4, ringHeight + 4);
-      }
-      ctx.stroke();
-    }
-
-    // --- The ring around a potato he's standing over and could pick up -------
-    // Only shown when his hands are empty, because that's the only time
-    // Space would actually pick it up.
-    if (this.nearestDrop && !this.holding && this.mode === 'play') {
-      var drop = this.nearestDrop;
-      var dropPulse = 0.6 + 0.4 * Math.sin(performance.now() / 150);
-      ctx.strokeStyle = 'rgba(' + C.HIGHLIGHT + ',' + dropPulse + ')';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.ellipse(drop.x, drop.y, 20, 8, 0, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // --- The ring around a flat robot he's standing over and could lift ------
-    if (this.nearestFlat && this.mode === 'play') {
-      var flat = this.nearestFlat;
-      var flatPulse = 0.6 + 0.4 * Math.sin(performance.now() / 150);
-      ctx.strokeStyle = 'rgba(' + C.HIGHLIGHT + ',' + flatPulse + ')';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.ellipse(flat.x, flat.y - 1, 24, 9, 0, 0, Math.PI * 2);
-      ctx.stroke();
+    // --- Each player's glow, in that player's colour -------------------------
+    // Player 2's rings are drawn slightly smaller, so if both players are
+    // aiming at the same thing you can see both rings at once.
+    if (this.mode === 'play') {
+      for (i = 0; i < this.chefs.length; i++) this.drawGlow(this.chefs[i], i * 4);
     }
 
     // --- Speech bubbles, with the order and the patience bar -----------------
@@ -1631,6 +1680,25 @@
     }
     ctx.globalAlpha = 1;
 
+    // --- Both players' batteries, in the top right --------------------------
+    // Each labelled P1 or P2 in that player's colour. Player 2's sits on the
+    // far right, player 1's just to its left.
+    var hudBarWidth = 48;
+    for (i = 0; i < this.chefs.length; i++) {
+      var hc = this.chefs[i];
+      var barRight = C.WIDTH - 8 - (this.chefs.length - 1 - i) * 78;
+      var barLeft = barRight - hudBarWidth;
+      ctx.font = '10px ' + C.FONT;
+      ctx.textAlign = 'right';
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = C.INK;
+      ctx.strokeText(hc.label, barLeft - 5, 13);
+      ctx.fillStyle = hc.colour;
+      ctx.fillText(hc.label, barLeft - 5, 13);
+      ctx.textAlign = 'left';
+      this.drawBatteryBar(barLeft + hudBarWidth / 2, 6, hc.battery, hudBarWidth);
+    }
+
     // --- The debug outlines, if switched on in config.js ---------------------
     if (C.SHOW_ZONES) {
       ctx.setLineDash([4, 3]);
@@ -1653,6 +1721,130 @@
     }
 
     if (this.mode !== 'play') this.drawOverlay();
+  };
+
+
+  // A chef's number (1 or 2), in its player's colour with a dark outline.
+  Game.prototype.drawChefLabel = function (chef, x, y) {
+    var ctx = this.ctx;
+    ctx.font = '11px ' + C.FONT;
+    ctx.textAlign = 'center';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = C.INK;
+    ctx.strokeText(chef.number, x, y);
+    ctx.fillStyle = chef.colour;
+    ctx.fillText(chef.number, x, y);
+    ctx.textAlign = 'left';
+  };
+
+  // A flat robot slung over a chef's shoulders — a helper, or the other chef.
+  Game.prototype.drawCarried = function (robot, x, y) {
+    var ctx = this.ctx;
+    var scale = robot.isChef ? 0.8 : C.HELPER_SCALE * 0.8;
+    var cw = C.CHEF_WIDTH * scale;
+    var cht = C.CHEF_HEIGHT * scale;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(Math.PI / 2);
+    this.picture('chef_robot', -cw / 2, -cht / 2, cw, cht);
+    ctx.restore();
+    // A carried chef keeps its number, so everyone can see who's who.
+    if (robot.isChef) this.drawChefLabel(robot, x + cht / 2 + 6, y + 4);
+  };
+
+  // One chef: the ring on the floor in its player's colour, the robot
+  // itself, whatever it is holding or carrying, its battery, and its number.
+  Game.prototype.drawChef = function (chef) {
+    var ctx = this.ctx;
+
+    this.shadow(chef.x, chef.y - 1, 18, 5);
+
+    // The ring on the floor, so you can tell the two players apart.
+    ctx.strokeStyle = chef.colour;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.ellipse(chef.x, chef.y - 1, 19, 6, 0, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // --- Collapsed: lying on its side until the other chef carries it off ---
+    if (chef.flat) {
+      ctx.save();
+      ctx.translate(chef.x, chef.y - 14);
+      ctx.rotate(Math.PI / 2);
+      ctx.globalAlpha = 0.75;
+      this.picture('chef_robot', -C.CHEF_WIDTH / 2, -C.CHEF_HEIGHT / 2,
+                   C.CHEF_WIDTH, C.CHEF_HEIGHT);
+      ctx.restore();
+      ctx.globalAlpha = 1;
+      this.drawChefLabel(chef, chef.x - 12, chef.y - 40);
+
+      // A flashing red mark so it's obvious it needs collecting.
+      ctx.globalAlpha = 0.5 + 0.5 * Math.sin(performance.now() / 160);
+      ctx.fillStyle = C.BATTERY_LOW_COLOUR;
+      ctx.font = '13px ' + C.FONT;
+      ctx.textAlign = 'center';
+      ctx.fillText('!', chef.x + 4, chef.y - 40);
+      ctx.textAlign = 'left';
+      ctx.globalAlpha = 1;
+      return;
+    }
+
+    var bob = chef.walkPhase ? -Math.abs(Math.sin(chef.walkPhase)) * 2.5 : 0;
+    this.picture('chef_robot',
+                 chef.x - C.CHEF_WIDTH / 2, chef.y - C.CHEF_HEIGHT + bob,
+                 C.CHEF_WIDTH, C.CHEF_HEIGHT);
+    if (chef.holding) {
+      this.drawPotato(chef.holding, chef.x, chef.y - 24 + bob, C.POTATO_IN_HANDS);
+    }
+    if (chef.carrying) {
+      this.drawCarried(chef.carrying, chef.x, chef.y - C.CHEF_HEIGHT - 6 + bob);
+    }
+
+    // The battery bar over its head, with the player number just to its left.
+    var barY = chef.y - C.CHEF_HEIGHT - 9 + bob;
+    this.drawBatteryBar(chef.x, barY, chef.battery);
+    this.drawChefLabel(chef, chef.x - 25, barY + 6);
+  };
+
+  // The pulsing glow round whatever this chef's action key will use, in that
+  // player's colour. It reads the same answer as useStation(), so it only
+  // ever glows round something the key will really do.
+  // 'inset' draws the ring that many pixels smaller.
+  Game.prototype.drawGlow = function (chef, inset) {
+    var ctx = this.ctx;
+    if (chef.flat) return;
+
+    ctx.strokeStyle = chef.colour;
+    ctx.globalAlpha = 0.6 + 0.4 * Math.sin(performance.now() / 150);
+    ctx.beginPath();
+
+    if (chef.nearest && this.canUse(chef, chef.nearest)) {
+      // A station. For a customer, ring the robot up in the hatch rather
+      // than the invisible patch of floor you're standing on.
+      var s = chef.nearest;
+      var ringX = s.type === 'bay' ? s.drawX : s.x;
+      var ringW = s.type === 'bay' ? C.BAY_WIDTH : s.w;
+      var ringH = s.type === 'bay' ? C.HATCH_HEIGHT : s.h;
+      var left = ringX - 2 + inset, top = s.y - 2 + inset;
+      var width = ringW + 4 - inset * 2, height = ringH + 4 - inset * 2;
+      ctx.lineWidth = 3;
+      if (ctx.roundRect) ctx.roundRect(left, top, width, height, 10);
+      else ctx.rect(left, top, width, height);
+    } else if (chef.nearestDrop) {
+      // A potato on the floor it would pick up.
+      ctx.lineWidth = 2;
+      ctx.ellipse(chef.nearestDrop.x, chef.nearestDrop.y, 20 - inset, 8 - inset / 2, 0, 0, Math.PI * 2);
+    } else if (chef.nearestFlat) {
+      // A flat robot it would lift.
+      ctx.lineWidth = 2;
+      ctx.ellipse(chef.nearestFlat.x, chef.nearestFlat.y - 1, 24 - inset, 9 - inset / 2, 0, 0, Math.PI * 2);
+    } else {
+      ctx.globalAlpha = 1;
+      return;   // nothing to glow round
+    }
+
+    ctx.stroke();
+    ctx.globalAlpha = 1;
   };
 
 
@@ -1723,13 +1915,16 @@
     };
 
     if (this.mode === 'title') {
-      line(C.TITLE, 220, 52, '#f2c230');
-      line(C.TITLE_HINT, 262, 20);
-      line(C.TITLE_CONTROLS, 292, 14, '#d9d2c2');
-      line(C.TITLE_BATTERY, 314, 13, '#f2c230');
-      line(C.TITLE_HELPERS, 338, 12, '#d9d2c2');
-      line(C.TITLE_FLAT, 358, 12, '#d9d2c2');
-      line(C.TITLE_MUTE, 384, 12, '#9a9086');
+      line(C.TITLE, 196, 52, '#f2c230');
+      line(C.TITLE_HINT, 234, 20);
+      line(C.TITLE_CONTROLS_P1, 266, 14, '#d9d2c2');
+      line(C.TITLE_CONTROLS_P2, 286, 14, '#d9d2c2');
+      line(C.TITLE_CONTROLS_NOTE, 302, 11, '#9a9086');
+      line(C.TITLE_BATTERY, 328, 13, '#f2c230');
+      line(C.TITLE_HELPERS, 350, 12, '#d9d2c2');
+      line(C.TITLE_FLAT, 370, 12, '#d9d2c2');
+      line(C.TITLE_FLAT_2, 386, 12, '#d9d2c2');
+      line(C.TITLE_MUTE, 412, 12, '#9a9086');
     }
 
     if (this.mode === 'paused') {
@@ -1739,10 +1934,12 @@
 
     if (this.mode === 'over') {
       // Two ways to lose, so the screen says which one it was.
-      line(this.overReason === 'battery' ? C.GAME_OVER_FLAT : C.GAME_OVER, 200, 40, '#e0483c');
-      line(this.coins + C.COINS_LABEL, 250, 32);
-      line(C.BEST_LABEL + this.bestScore, 282, 18, '#d9d2c2');
-      line(C.GAME_OVER_HINT, 330, 18, '#f2c230');
+      var flatOut = this.overReason === 'battery';
+      line(flatOut ? C.GAME_OVER_FLAT : C.GAME_OVER, 196, 40, '#e0483c');
+      line(flatOut ? C.GAME_OVER_FLAT_WHY : C.GAME_OVER_WHY, 222, 15, '#d9d2c2');
+      line(this.coins + C.COINS_LABEL, 262, 32);
+      line(C.BEST_LABEL + this.bestScore, 292, 18, '#d9d2c2');
+      line(C.GAME_OVER_HINT, 334, 18, '#f2c230');
     }
   };
 
@@ -1762,12 +1959,30 @@
     // --- Keyboard -----------------------------------------------------------
     // Listened for on the whole window rather than just the canvas, so the
     // controls keep working no matter where you last clicked.
-    window.addEventListener('keydown', function (e) {
-      var key = e.key.toLowerCase();
+    //
+    // Keys are read by 'e.code' — WHERE the key is on the keyboard — rather
+    // than by the letter it types, so Num Lock and Shift make no difference.
+    // The key lists themselves are in config.js under THE KEYS.
 
-      if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].indexOf(key) !== -1) {
-        e.preventDefault();
-      }
+    // Every key the game uses, so the browser can be told not to do its own
+    // thing with them (like scrolling the page).
+    var gameKeys = [C.RESTART_KEY, C.MUTE_KEY];
+    game.chefs.forEach(function (chef) {
+      ['up', 'down', 'left', 'right', 'action'].forEach(function (move) {
+        gameKeys = gameKeys.concat(chef.keys[move]);
+      });
+    });
+
+    // Is this key one of this chef's action keys?
+    function isActionKey(chef, code) {
+      return chef.keys.action.indexOf(code) !== -1;
+    }
+
+    window.addEventListener('keydown', function (e) {
+      var code = e.code;
+      var i;
+
+      if (gameKeys.indexOf(code) !== -1) e.preventDefault();
 
       // Browsers refuse to make any noise until the person has touched the
       // page. This is the first moment we are allowed to switch the sound on.
@@ -1775,25 +1990,35 @@
 
       // M mutes. This has to come BEFORE the "any key starts the game" line
       // below, or muting from the title screen would also start the round.
-      if (key === 'm') {
+      if (code === C.MUTE_KEY) {
         if (typeof SOUND !== 'undefined') SOUND.toggleMute();
         return;
       }
 
-      if (key === 'r' && game.mode === 'over') { game.reset(); return; }
+      if (code === C.RESTART_KEY && game.mode === 'over') { game.reset(); return; }
 
+      // Any other key starts the game from the title screen, or un-pauses.
       if (game.mode === 'title' || game.mode === 'paused') {
         game.mode = 'play';
-        if (key === ' ') return;   // don't also use a station on the same press
+        // Don't also use a station on the same press.
+        for (i = 0; i < game.chefs.length; i++) {
+          if (isActionKey(game.chefs[i], code)) return;
+        }
       }
 
-      if (key === ' ' && !e.repeat && game.mode === 'play') game.useStation();
+      // Each player's action key works for that player's chef only. Holding
+      // it down doesn't repeat — one press, one action.
+      if (!e.repeat && game.mode === 'play') {
+        for (i = 0; i < game.chefs.length; i++) {
+          if (isActionKey(game.chefs[i], code)) game.useStation(game.chefs[i]);
+        }
+      }
 
-      game.keysHeld[key] = true;
+      game.keysHeld[code] = true;
     });
 
     window.addEventListener('keyup', function (e) {
-      game.keysHeld[e.key.toLowerCase()] = false;
+      game.keysHeld[e.code] = false;
     });
 
     // Click anywhere on the game to start or un-pause.

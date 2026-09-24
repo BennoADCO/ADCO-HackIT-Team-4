@@ -33,22 +33,37 @@ var CONFIG = {
 
 
   // ==========================================================================
-  //  THE CHEF (the robot you drive)
+  //  THE CHEFS (the two robots you drive)
   // ==========================================================================
+  //
+  //  Two players, one kitchen. Both chefs share the coins, the lives and the
+  //  best score. Each one has its own battery and its own hands.
 
   CHEF_SPEED: 140,        // pixels per second. Higher = faster running.
-  CHEF_WIDTH: 48,         // how wide he's drawn
-  CHEF_HEIGHT: 66,        // how tall he's drawn
-  CHEF_START_X: 250,      // where he stands when a round begins
-  CHEF_START_Y: 300,
+  CHEF_WIDTH: 48,         // how wide each chef is drawn
+  CHEF_HEIGHT: 66,        // how tall each chef is drawn
 
-  // How close he has to be to a station before Spacebar will work on it.
-  // Bigger number = more forgiving. 38 is about a chef-and-a-half.
+  // Where each chef stands when a round begins. Both spots must be inside the
+  // walk box below, and at least a chef's width (48) apart so they don't
+  // start on top of each other.
+  P1_START_X: 210,
+  P1_START_Y: 300,
+  P2_START_X: 290,
+  P2_START_Y: 300,
+
+  // Each player's colour. It's used for the ring on the floor under their
+  // chef, the little number over its head, their battery in the top corner,
+  // and the glow around whatever their action key will use.
+  P1_COLOUR: '#ff3b8d',   // pink
+  P2_COLOUR: '#2979ff',   // blue
+
+  // How close a chef has to be to a station before the action key will work
+  // on it. Bigger number = more forgiving. 38 is about a chef-and-a-half.
   REACH: 38,
 
-  // Standing on open floor with nothing in reach, Spacebar puts down whatever
-  // he's carrying — and picks it up again if his hands are empty. This is how
-  // close he has to be to a potato lying on the floor to pick it up.
+  // Standing on open floor with nothing in reach, the action key puts down
+  // whatever you're holding — and picks it up again if your hands are empty.
+  // This is how close you have to be to a potato on the floor to pick it up.
   DROP_REACH: 30,
 
   // The box his FEET are allowed to stay inside. He can't walk outside this.
@@ -116,19 +131,22 @@ var CONFIG = {
 
 
   // ==========================================================================
-  //  THE ROBOT'S BATTERY
+  //  THE CHEFS' BATTERIES
   // ==========================================================================
   //
-  //  The chef runs on a battery, shown as a yellow bar above his head. It
-  //  drains the whole time he is working.
+  //  Each chef runs on its own battery, shown as a yellow bar above its head
+  //  and again in the top right corner. It drains the whole time it's working.
   //
   //     FULL battery  ->  full running speed
   //     HALF battery  ->  noticeably sluggish
-  //     FLAT battery  ->  the round ends there and then, however many
-  //                       lives you still had
+  //     FLAT battery  ->  that chef collapses on the spot, and its player's
+  //                       keys stop working. The OTHER chef can pick it up
+  //                       (empty hands, action key) and carry it to the
+  //                       charging pad to wake it up. If BOTH chefs are flat
+  //                       at once, the round ends.
   //
-  //  To fill it back up he stands on the charging pad in the top right. He
-  //  does NOT press Space for it — just walking onto it is enough.
+  //  To fill it back up a chef stands on the charging pad in the top right.
+  //  No key needed — just walking onto it is enough.
   //
   //  This is the second clock in the game, running against the oven and the
   //  customers. If the room finds it punishing, make BATTERY_LASTS bigger.
@@ -159,8 +177,8 @@ var CONFIG = {
   // ==========================================================================
   //
   //  Walk to the parts table in the top left and, with EMPTY hands, press
-  //  Space to build a helper robot. It reads the customers' orders and
-  //  fulfils them on its own.
+  //  your action key to build a helper robot. It reads the customers' orders
+  //  and fulfils them on its own.
   //
   //  Helpers run on batteries (see HELPER_BATTERY_LASTS below). They are lost
   //  when you restart.
@@ -189,10 +207,13 @@ var CONFIG = {
   HELPER_PAUSE: 0.35,
 
   // Helpers run on batteries too. When one goes flat it collapses on the spot
-  // and stays there until YOU carry it to the charging pad. Walk up to a
-  // collapsed robot, press Space to hoist it, then stand on the pad.
+  // and stays there until a chef carries it to the charging pad. Walk up to a
+  // collapsed robot with empty hands, press your action key to hoist it, then
+  // stand on the pad.
   HELPER_BATTERY_LASTS: 22.5,   // seconds of work before a helper collapses
-  HELPER_PICKUP_REACH: 34,      // how close you must be to pick one up
+  // How close you must be to pick up a flat robot — a helper, or the other
+  // chef when its battery has run out.
+  HELPER_PICKUP_REACH: 34,
 
   HELPER_SCALE: 0.88,           // drawn slightly smaller than you
   HELPER_TINTS: ['#4fc3f7', '#9ccc65', '#ff8a65', '#ba68c8'],  // floor ring colours
@@ -210,7 +231,7 @@ var CONFIG = {
   PARTS_HEIGHT: 52,
 
   // How close your feet must be to the FRONT of the parts table (the middle
-  // of its bottom edge) before Space will buy a robot there.
+  // of its bottom edge) before the action key will buy a robot there.
   //
   // The table stands out on the open floor, unlike everything else, which
   // sits against a wall. Measured from its whole outline, a big patch of
@@ -319,7 +340,8 @@ var CONFIG = {
   // ==========================================================================
 
   INK: '#2a2320',               // the dark outline colour used for text
-  HIGHLIGHT: '255,210,63',      // the pulsing ring around the nearest station
+  // (The pulsing glow round whatever a chef's action key will use is drawn
+  // in that player's colour — see P1_COLOUR and P2_COLOUR up top.)
 
   // The splash of paint that puffs out when you dunk a potato.
   PAINT_SPLASH: { red: '#d9392b', blue: '#2f6fd6', green: '#3aa845', yellow: '#f2c230' },
@@ -366,23 +388,68 @@ var CONFIG = {
 
 
   // ==========================================================================
+  //  THE KEYS
+  // ==========================================================================
+  //
+  //  Keys are named by WHERE they are on the keyboard, not by what they type,
+  //  so Num Lock and Shift make no difference:
+  //
+  //     'KeyW'     the W key
+  //     'Numpad8'  8 on the number pad, on the right of a full keyboard
+  //     'Digit8'   8 on the row of numbers along the top
+  //
+  //  Each action can have more than one key — list them all in the brackets.
+  //  Player 2 gets both the number pad AND the top row, because a lot of
+  //  laptops have no number pad at all.
+  //
+  //  If you change a key here, change the words further down to match, and
+  //  the line of help text under the game in index.html.
+
+  P1_KEYS: {
+    up:     ['KeyW'],
+    down:   ['KeyS'],
+    left:   ['KeyA'],
+    right:  ['KeyD'],
+    action: ['KeyE']
+  },
+
+  P2_KEYS: {
+    up:     ['Numpad8', 'Digit8'],
+    down:   ['Numpad5', 'Digit5'],
+    left:   ['Numpad4', 'Digit4'],
+    right:  ['Numpad6', 'Digit6'],
+    action: ['Numpad7', 'Digit7']
+  },
+
+  RESTART_KEY: 'KeyR',    // starts a new round once the kitchen has closed
+  MUTE_KEY: 'KeyM',       // sound off and on
+
+
+  // ==========================================================================
   //  THE WORDS ON SCREEN
   // ==========================================================================
 
   TITLE: 'SPUD RUSH',
-  TITLE_HINT: 'Click to start',
-  TITLE_CONTROLS: 'Arrows / WASD to walk  ·  Space to use',
+  TITLE_HINT: 'Click or press a key to start',
+  TITLE_CONTROLS_P1: 'Player 1:  W A S D to walk  ·  E to use',
+  TITLE_CONTROLS_P2: 'Player 2:  8 4 5 6 to walk  ·  7 to use',
+  TITLE_CONTROLS_NOTE: '(number pad, or the number keys along the top)',
   PAUSED: 'Paused',
-  PAUSED_HINT: 'Click to resume',
+  PAUSED_HINT: 'Click or press a key to resume',
   GAME_OVER: 'KITCHEN CLOSED',
-  GAME_OVER_FLAT: 'FLAT BATTERY',        // shown when the battery ran out instead
+  GAME_OVER_WHY: 'Too many unhappy customers',       // under GAME_OVER
+  GAME_OVER_FLAT: 'BOTH CHEFS FLAT',                 // shown when the batteries ran out instead
+  GAME_OVER_FLAT_WHY: 'Both batteries ran out at once',
   GAME_OVER_HINT: 'Press R to go again',
-  TITLE_BATTERY: 'Keep your battery up — stand on the charger to refill',
-  // The two helper-robot lines. Keep each one about this long or shorter —
+  TITLE_BATTERY: 'Keep your batteries up — stand on the charger to refill',
+  // The helper-robot lines. Keep each one about this long or shorter —
   // anything wider than the screen gets squashed to fit.
-  TITLE_HELPERS: 'Parts table: empty hands + Space buys a helper for coins',
-  TITLE_FLAT: 'Flat helper? Empty hands + Space lifts it. Walk onto the charger',
+  TITLE_HELPERS: 'Parts table: empty hands + E / 7 buys a helper for coins',
+  TITLE_FLAT: 'Helper or partner gone flat? Empty hands + E / 7 lifts it,',
+  TITLE_FLAT_2: 'then walk onto the charger to wake it up',
   TITLE_MUTE: 'M to mute',
+  HUD_P1: 'P1',           // the labels on the two batteries in the top corner
+  HUD_P2: 'P2',
   BEST_LABEL: 'Best: ',
   COINS_LABEL: ' coins',
 
