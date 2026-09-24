@@ -145,13 +145,15 @@ var CONFIG = {
 
   FLOOR_TILE_SIZE: 30,     // size of the checkerboard floor tiles
 
-  // Customer area pieces
-  CUSTOMER_X: 110,         // the customer's face
-  CUSTOMER_Y: 84,
-  CUSTOMER_SIZE: 48,
-  PATIENCE_BAR: { x: 50, y: 118, w: 120, h: 10 },
-  TICKET: { x: 250, y: 50, w: 130, h: 84 },   // the coloured order ticket
-  SHOW_RECIPE_ON_TICKET: true,                // show the 3 ingredients on the ticket
+  // Customer area pieces.
+  // The customer area is split into side-by-side "slots" — one spot at the
+  // counter per customer. The x and y numbers below are measured from the
+  // LEFT EDGE OF ONE SLOT, so every slot is laid out the same way.
+  CUSTOMER_SLOT_WIDTH: 150,                        // 3 slots x 150 = the full 450 half
+  CUSTOMER_FACE: { x: 30, y: 82, size: 38 },       // the customer's face
+  TICKET: { x: 58, y: 50, w: 86, h: 62 },          // the coloured order ticket
+  PATIENCE_BAR: { x: 10, y: 122, w: 130, h: 10 },
+  SHOW_RECIPE_ON_TICKET: true,                     // show the 3 ingredients on the ticket
 
   // Little "time left" badge that appears when you've been sabotaged
   COUNTDOWN_BADGE: { x: 8, y: 148, w: 128, h: 28 },
@@ -225,7 +227,10 @@ var CONFIG = {
     { id: 'burger', name: 'Burger & Fries',     emoji: '🍔', ticketColor: '#e5483b', // tomato red
       ingredients: ['patty', 'fries', 'ketchup'], cookSeconds: 4, enabled: true },
 
-    { id: 'jacket', name: 'Loaded Jacket Spud', emoji: '🧀', ticketColor: '#f2a900', // marigold yellow
+    // There's no jacket potato emoji, so this dish is DRAWN instead (see
+    // JACKET_POTATO further down). drawing: 'jacket' switches that on;
+    // the emoji is only a back-up.
+    { id: 'jacket', name: 'Loaded Jacket Spud', emoji: '🥔', drawing: 'jacket', ticketColor: '#f2a900', // marigold yellow
       ingredients: ['potato', 'cheese', 'beans'], cookSeconds: 5, enabled: true },
 
     { id: 'steak',  name: 'Steak & Mash',       emoji: '🥩', ticketColor: '#6a3fa0', // deep purple
@@ -242,14 +247,37 @@ var CONFIG = {
   // Serving it counts as a wrong dish.
   SLOP: { id: 'slop', name: 'Mystery Slop', emoji: '🤢', cookSeconds: 3 },
 
+  // true  = a wrong mix comes out LOOKING like a normal dish (whichever real
+  //         dish is closest to what went in), so you can't tell until the
+  //         customer tastes it and gets angry.
+  // false = a wrong mix comes out as the 🤢 above, so it's obvious.
+  SLOP_LOOKS_NORMAL: true,
+
+  // The colours of the hand-drawn jacket potato (the Loaded Jacket Spud).
+  JACKET_POTATO: {
+    SKIN:       '#b8763a',   // the crispy brown skin
+    SKIN_EDGE:  '#6e4219',   // outline round the skin
+    SPECKLE:    '#8a5427',   // little dark spots on the skin
+    FLESH:      '#fbe7b0',   // fluffy inside where it's split open
+    CHEESE:     '#ffc928',   // melted cheese
+    BEANS:      '#e0622a',   // the beans
+    SAUCE:      '#c2411b'    // bean sauce under the beans
+  },
+
 
   // ==========================================================================
   //  CUSTOMERS
   // ==========================================================================
 
-  CUSTOMER_PATIENCE_SECONDS: 20,  // how long the patience bar lasts
+  // How many customers can wait at your counter at once. Each one has their
+  // own order and their own patience bar. If you change this, also shrink
+  // CUSTOMER_SLOT_WIDTH so they all fit (slots x width should be about 450).
+  CUSTOMER_QUEUE_SIZE: 3,
+
+  CUSTOMER_PATIENCE_SECONDS: 35,  // how long each patience bar lasts (longer now there are 3 to juggle)
   CUSTOMER_LEAVE_SECONDS: 0.8,    // how long a served customer hangs about before leaving
-  CUSTOMER_GAP_SECONDS: 1.0,      // empty counter time before the next customer arrives
+  CUSTOMER_GAP_SECONDS: 2.0,      // empty spot time before the next customer arrives
+  CUSTOMER_START_STAGGER: 3,      // at the start of a round, seconds between each customer turning up
 
   CUSTOMER_FACES: ['🧑', '👩', '👨', '👵', '👴', '🧔', '👱', '👷'],
   FACE_IMPATIENT: '😤',   // patience bar ran out
@@ -306,6 +334,12 @@ var CONFIG = {
 
   SOUND_VOLUME: 0.4,         // 0 = silent, 1 = loud. M mutes during play.
 
+  // Background music: a little looping tune made by the browser (no files).
+  // It plays while a round is on and stops when someone wins.
+  MUSIC_ON: true,            // false = no music, sound effects only
+  MUSIC_VOLUME: 0.6,         // music loudness compared to the sound effects. 0.3 = quieter.
+  MUSIC_TEMPO: 132,          // speed in beats per minute. Higher = faster, more frantic.
+
 
   // ==========================================================================
   //  COLOURS
@@ -344,7 +378,8 @@ var CONFIG = {
     SLIPPERY_TINT:  '#ffe066',
     HINT:           '#ffe9a8',
     WRONG:          '#ff6b6b',
-    KEYCAP:         '#ece6f7'
+    KEYCAP:         '#ece6f7',
+    CUSTOMER_SLOT_LINE: '#2a201c'   // thin line between customer spots
   },
 
 
@@ -358,10 +393,11 @@ var CONFIG = {
     SUBTITLE:         'First to ${TARGET} wins!',
     HOW_TO_PLAY:      'Walk into 3 ingredients  →  walk into the 🔥 oven  →  grab the plate  →  serve the customer',
     HOW_TO_PLAY_2:    'Wrong armful? Walk into the 🗑️ bin.   Earn points, then sabotage your rival!',
+    HOW_TO_PLAY_TIP:  'Tip: you can carry a plate AND ingredients — load the next dish before you serve!',
     P1_CONTROLS:      'P1 👨‍🍳   Move: W A S D     Sabotage: 1 = 🧊 Oven Freeze   2 = 🧈 Slippery Floor',
     P2_CONTROLS:      'P2 👩‍🍳   Move: Arrow keys   Sabotage: 7 = 🧊 Oven Freeze   8 = 🧈 Slippery Floor',
     PRESS_START:      'Press any key to start',
-    MUTE_HINT:        'M = sound on / off',
+    MUTE_HINT:        'M = sound & music on / off',
 
     POINTS_LABEL:     'pts',
     LATE:             'LATE – half pay',
@@ -371,7 +407,7 @@ var CONFIG = {
     SERVED_SLOP:      'SLOP?! $0',
 
     HINT_NEED_3:      'Need 3 ingredients!',
-    HINT_HANDS_FULL:  'Hands full! Use the 🗑️',
+    HINT_HANDS_FULL:  'Serve your plate first!',
     HINT_FROZEN:      '🧊 Frozen shut!',
     HINT_COOK_FIRST:  'Cook it in the 🔥 first!',
 

@@ -68,9 +68,11 @@ function makePlayer(index) {
     y: setup.startY,
     moving: false,
 
-    // What the chef is carrying: up to 3 ingredient ids, OR one finished plate
+    // What the chef is carrying: up to 3 ingredient ids, AND/OR one finished
+    // plate. Carrying both lets you load the next dish before you serve.
     held: [],
     plate: null,          // the id of the dish on the plate, or null for none
+    plateLook: null,      // what the plate LOOKS like (a wrong mix can look normal)
 
     money: 0,
     points: 0,            // sabotage points
@@ -82,25 +84,34 @@ function makePlayer(index) {
     oven: {
       state: 'empty',     // 'empty', 'cooking' or 'done'
       dishId: null,       // what will come out
+      lookId: null,       // what it will LOOK like when it comes out
       contents: [],       // the ingredients that went in (drawn while cooking)
       timeLeft: 0,
       totalTime: 0
     },
 
-    customer: {
-      state: 'empty',     // 'waiting', 'leaving' or 'empty'
-      face: '',
-      dishId: null,       // what they ordered
-      patience: 0,        // seconds of patience left
-      timer: 0,           // counts down while 'leaving' or 'empty'
-      count: 0            // how many customers this player has had
-    },
+    // The customers at this player's counter: a list (an "array" — a
+    // numbered list of things) with one entry per spot at the counter.
+    // Filled in by resetGame().
+    customers: [],
+    customerCount: 0,     // how many customers this player has had so far
 
     sabotage: null,       // the sabotage hitting THIS player, or null
     announce: null,       // the big "OVEN FREEZE!" message, or null
     pendingSound: null,   // a sound waiting to play a moment later
     flash: 0,             // seconds of screen flash left
     shake: 0              // seconds of screen shake left
+  };
+}
+
+// One empty spot at the counter.
+function makeCustomerSpot() {
+  return {
+    state: 'empty',     // 'waiting', 'leaving' or 'empty'
+    face: '',
+    dishId: null,       // what they ordered
+    patience: 0,        // seconds of patience left
+    timer: 0            // counts down while 'leaving' or 'empty'
   };
 }
 
@@ -111,7 +122,15 @@ function resetGame() {
   floatingTexts = [];
   dishSequence = [];
   for (var i = 0; i < players.length; i++) {
-    newCustomer(players[i]);
+    var p = players[i];
+    for (var s = 0; s < CONFIG.CUSTOMER_QUEUE_SIZE; s++) {
+      var spot = makeCustomerSpot();
+      // The first customer is there straight away; the others turn up
+      // one after another, so you're not swamped in the first second.
+      spot.timer = s * CONFIG.CUSTOMER_START_STAGGER;
+      p.customers.push(spot);
+    }
+    newCustomer(p, p.customers[0]);
   }
 }
 
@@ -120,12 +139,14 @@ function startGame() {
   resetGame();
   state = 'playing';
   sfx('start');
+  startMusic();
 }
 
 // Somebody hit the target money.
 function declareWinner(p) {
   state = 'over';
   winnerIndex = p.index;
+  stopMusic();
   sfx('win');
 }
 
@@ -202,6 +223,30 @@ function matchRecipe(held) {
   return null;
 }
 
+// Which real dish is closest to these ingredients? (The one sharing the
+// most ingredients with them.) Used to disguise a wrong mix.
+function closestDish(held) {
+  var dishes = enabledDishes();
+  var best = null;
+  var bestShared = -1;
+  for (var i = 0; i < dishes.length; i++) {
+    var shared = 0;
+    for (var j = 0; j < held.length; j++) {
+      if (dishes[i].ingredients.indexOf(held[j]) !== -1) {
+        shared = shared + 1;
+      }
+    }
+    if (shared > bestShared) {
+      best = dishes[i];
+      bestShared = shared;
+    }
+  }
+  if (best === null) {
+    return CONFIG.SLOP;   // safety net if every dish was switched off
+  }
+  return best;
+}
+
 // Is this particular sabotage currently hitting this player?
 function hasSabotage(p, id) {
   return p.sabotage !== null && p.sabotage.id === id;
@@ -250,7 +295,7 @@ function update(dt) {
     moveChef(p, dt);
     checkStations(p);
     updateOven(p, dt);
-    updateCustomer(p, dt);
+    updateCustomers(p, dt);
 
     // Someone may have just won — stop right here if so.
     if (state !== 'playing') {
@@ -353,6 +398,7 @@ function checkStations(p) {
   if (onBin && (p.held.length > 0 || p.plate !== null)) {
     p.held = [];
     p.plate = null;
+    p.plateLook = null;
     sfx('bin');
   }
 
@@ -365,9 +411,9 @@ function checkStations(p) {
   }
 }
 
-// Walked into an ingredient station.
+// Walked into an ingredient station. (You can do this while carrying a
+// plate — the plate is in one hand, ingredients in the other.)
 function tryPickUp(p, ingredientId) {
-  if (p.plate !== null) return;                        // hands full with a plate
   if (p.held.length >= CONFIG.MAX_HELD) return;        // already carrying 3
   if (p.held.indexOf(ingredientId) !== -1) return;     // already got this one
   p.held.push(ingredientId);
@@ -387,17 +433,23 @@ function useOven(p, justEntered) {
     return;
   }
 
+  // Carrying a plate doesn't stop you loading the oven, so you can get the
+  // next dish cooking and THEN go and serve.
   if (oven.state === 'empty') {
-    if (p.plate === null && p.held.length === CONFIG.MAX_HELD) {
+    if (p.held.length === CONFIG.MAX_HELD) {
       loadOven(p);
-    } else if (justEntered && p.plate === null && p.held.length > 0) {
+    } else if (justEntered && p.held.length > 0) {
       addFloatingText(p, o.x, o.y - 55, CONFIG.TEXT.HINT_NEED_3, CONFIG.COLORS.HINT);
     }
   } else if (oven.state === 'done') {
-    if (p.plate === null && p.held.length === 0) {
+    // Take the plate out. If you're also holding 3 ingredients, the oven is
+    // now empty, so next frame they go straight in — a quick swap.
+    if (p.plate === null) {
       p.plate = oven.dishId;
+      p.plateLook = oven.lookId;
       oven.state = 'empty';
       oven.dishId = null;
+      oven.lookId = null;
       oven.contents = [];
       sfx('plateUp');
     } else if (justEntered) {
@@ -410,11 +462,17 @@ function useOven(p, justEntered) {
 function loadOven(p) {
   var oven = p.oven;
   var dish = matchRecipe(p.held);
+  var look = dish;
   if (dish === null) {
-    dish = CONFIG.SLOP;   // no recipe matched: 🤢
+    dish = CONFIG.SLOP;   // no recipe matched: it's secretly slop
+    look = CONFIG.SLOP;
+    if (CONFIG.SLOP_LOOKS_NORMAL) {
+      look = closestDish(p.held);   // ...but disguised as a real dish
+    }
   }
   oven.state = 'cooking';
   oven.dishId = dish.id;
+  oven.lookId = look.id;
   oven.contents = p.held;
   oven.totalTime = dish.cookSeconds;
   oven.timeLeft = dish.cookSeconds;
@@ -438,9 +496,14 @@ function updateOven(p, dt) {
 
 // Standing at the serving counter.
 function useCounter(p, justEntered) {
-  if (p.plate !== null && p.customer.state === 'waiting') {
-    serveCustomer(p);
-  } else if (justEntered && p.plate === null && p.held.length > 0) {
+  if (p.plate !== null) {
+    // Go by what the plate LOOKS like, so a disguised wrong dish still goes
+    // to the customer you'd expect — who then finds out it's wrong.
+    var spotIndex = chooseCustomerToServe(p, p.plateLook);
+    if (spotIndex !== -1) {
+      serveCustomer(p, spotIndex);
+    }
+  } else if (justEntered && p.held.length > 0) {
     addFloatingText(p, CONFIG.COUNTER.x, CONFIG.COUNTER.y + 40, CONFIG.TEXT.HINT_COOK_FIRST, CONFIG.COLORS.HINT);
   }
 }
@@ -450,10 +513,14 @@ function useCounter(p, justEntered) {
 //  6. CUSTOMERS
 // ============================================================================
 
-// A new customer steps up to this player's counter.
-function newCustomer(p) {
-  var c = p.customer;
-  var n = c.count;
+// The middle of a customer spot, across the screen (inside one half).
+function spotCenterX(spotIndex) {
+  return spotIndex * CONFIG.CUSTOMER_SLOT_WIDTH + CONFIG.CUSTOMER_SLOT_WIDTH / 2;
+}
+
+// A new customer steps up to spot "c" at this player's counter.
+function newCustomer(p, c) {
+  var n = p.customerCount;
 
   // Make sure the shared order list is long enough, then read this
   // player's next order from it.
@@ -470,12 +537,17 @@ function newCustomer(p) {
   c.face = randomItem(CONFIG.CUSTOMER_FACES);
   c.patience = CONFIG.CUSTOMER_PATIENCE_SECONDS;
   c.timer = 0;
-  c.count = n + 1;
+  p.customerCount = n + 1;
 }
 
-function updateCustomer(p, dt) {
-  var c = p.customer;
+// Move every customer spot along a little.
+function updateCustomers(p, dt) {
+  for (var i = 0; i < p.customers.length; i++) {
+    updateCustomer(p, p.customers[i], dt);
+  }
+}
 
+function updateCustomer(p, c, dt) {
   if (c.state === 'waiting') {
     // Patience drains. At zero they get grumpy, but they never walk off.
     if (c.patience > 0) {
@@ -494,14 +566,42 @@ function updateCustomer(p, dt) {
   } else if (c.state === 'empty') {
     c.timer = c.timer - dt;
     if (c.timer <= 0) {
-      newCustomer(p);
+      newCustomer(p, c);
     }
   }
 }
 
-// Hand the plate to the customer and get paid (or not).
-function serveCustomer(p) {
-  var c = p.customer;
+// Holding a plate at the counter: who gets it?
+//   1. Someone who ordered this dish. If several did, the one who has been
+//      waiting longest (least patience left).
+//   2. If nobody ordered it, the longest-waiting customer gets it anyway —
+//      and it counts as a wrong dish.
+// Returns the spot number, or -1 if nobody is waiting.
+function chooseCustomerToServe(p, dishId) {
+  var best = -1;
+  var bestMatches = false;
+  for (var i = 0; i < p.customers.length; i++) {
+    var c = p.customers[i];
+    if (c.state !== 'waiting') {
+      continue;
+    }
+    var matches = (c.dishId === dishId);
+    if (best === -1) {
+      best = i;
+      bestMatches = matches;
+    } else if (matches && !bestMatches) {
+      best = i;          // a match always beats a non-match
+      bestMatches = true;
+    } else if (matches === bestMatches && c.patience < p.customers[best].patience) {
+      best = i;          // same kind, but this one has waited longer
+    }
+  }
+  return best;
+}
+
+// Hand the plate to the customer in spot "spotIndex" and get paid (or not).
+function serveCustomer(p, spotIndex) {
+  var c = p.customers[spotIndex];
   var pay = 0;
   var pts = 0;
   var message = '';
@@ -526,7 +626,7 @@ function serveCustomer(p) {
     pay = CONFIG.PAY_WRONG;
     pts = CONFIG.POINTS_WRONG;
     c.face = CONFIG.FACE_ANGRY;
-    if (p.plate === CONFIG.SLOP.id) {
+    if (p.plate === CONFIG.SLOP.id && !CONFIG.SLOP_LOOKS_NORMAL) {
       message = CONFIG.TEXT.SERVED_SLOP;
     } else {
       message = CONFIG.TEXT.SERVED_WRONG;
@@ -538,11 +638,15 @@ function serveCustomer(p) {
   p.money = p.money + pay;
   p.points = p.points + pts;
   p.plate = null;
+  p.plateLook = null;
 
   c.state = 'leaving';
   c.timer = CONFIG.CUSTOMER_LEAVE_SECONDS;
 
-  addFloatingText(p, CONFIG.HALF_WIDTH / 2, CONFIG.COUNTER.y + 36, message, color, 22);
+  // The "+$100" pops up under whichever customer was served. (Kept away
+  // from the very edges so the words don't get cut off.)
+  var textX = clamp(spotCenterX(spotIndex), 110, CONFIG.HALF_WIDTH - 110);
+  addFloatingText(p, textX, CONFIG.COUNTER.y + 36, message, color, 22);
 
   if (p.money >= CONFIG.TARGET_MONEY) {
     declareWinner(p);
@@ -735,14 +839,35 @@ function drawScoreBar(ctx, p) {
   drawBar(ctx, 0, bar.y + bar.h - 4, CONFIG.HALF_WIDTH, 4, p.money / CONFIG.TARGET_MONEY, C.MONEY, C.BAR_BACK);
 }
 
-// --- Customer area: face, ticket, patience bar ---
+// --- Customer area: a row of spots, each with a face, ticket, patience bar ---
 function drawCustomerArea(ctx, p) {
   var C = CONFIG.COLORS;
   var area = CONFIG.CUSTOMER_AREA;
-  var c = p.customer;
 
   ctx.fillStyle = C.CUSTOMER_AREA;
   ctx.fillRect(0, area.y, CONFIG.HALF_WIDTH, area.h);
+
+  for (var i = 0; i < p.customers.length; i++) {
+    var slotLeft = i * CONFIG.CUSTOMER_SLOT_WIDTH;
+
+    // Thin line between spots
+    if (i > 0) {
+      ctx.fillStyle = C.CUSTOMER_SLOT_LINE;
+      ctx.fillRect(slotLeft - 1, area.y + 6, 2, area.h - 12);
+    }
+
+    // "translate" slides the paintbrush along, so each spot can be drawn
+    // with the same numbers from config.js.
+    ctx.save();
+    ctx.translate(slotLeft, 0);
+    drawCustomer(ctx, p.customers[i]);
+    ctx.restore();
+  }
+}
+
+// One customer, drawn as if their spot started at x = 0.
+function drawCustomer(ctx, c) {
+  var C = CONFIG.COLORS;
 
   if (c.state === 'empty') {
     return;
@@ -758,26 +883,27 @@ function drawCustomerArea(ctx, p) {
   ctx.globalAlpha = alpha;
 
   // The face (angry customers shake)
-  var faceX = CONFIG.CUSTOMER_X;
+  var face = CONFIG.CUSTOMER_FACE;
+  var faceX = face.x;
   if (c.face === CONFIG.FACE_ANGRY) {
     faceX = faceX + Math.sin(clock * 60) * 3;
   }
-  drawEmoji(ctx, c.face, faceX, CONFIG.CUSTOMER_Y - lift, CONFIG.CUSTOMER_SIZE);
+  drawEmoji(ctx, c.face, faceX, face.y - lift, face.size);
 
   // The ticket, in the dish's colour
   var dish = findDish(c.dishId);
   var t = CONFIG.TICKET;
   if (dish !== null) {
-    drawRoundRect(ctx, t.x, t.y - lift, t.w, t.h, 10, dish.ticketColor, C.TEXT, 3);
+    drawRoundRect(ctx, t.x, t.y - lift, t.w, t.h, 8, dish.ticketColor, C.TEXT, 2);
     if (CONFIG.SHOW_RECIPE_ON_TICKET) {
-      drawEmoji(ctx, dish.emoji, t.x + t.w / 2, t.y + 26 - lift, 32);
-      drawRoundRect(ctx, t.x + 8, t.y + 50 - lift, t.w - 16, 26, 8, '#ffffffcc', null);
+      drawDish(ctx, dish.id, t.x + t.w / 2, t.y + 18 - lift, 26);
+      drawRoundRect(ctx, t.x + 5, t.y + 35 - lift, t.w - 10, 22, 6, '#ffffffcc', null);
       for (var i = 0; i < dish.ingredients.length; i++) {
-        var ix = t.x + t.w / 2 + (i - (dish.ingredients.length - 1) / 2) * 34;
-        drawEmoji(ctx, ingredientEmoji(dish.ingredients[i]), ix, t.y + 63 - lift, 20);
+        var ix = t.x + t.w / 2 + (i - (dish.ingredients.length - 1) / 2) * 24;
+        drawEmoji(ctx, ingredientEmoji(dish.ingredients[i]), ix, t.y + 46 - lift, 16);
       }
     } else {
-      drawEmoji(ctx, dish.emoji, t.x + t.w / 2, t.y + t.h / 2 - lift, 44);
+      drawDish(ctx, dish.id, t.x + t.w / 2, t.y + t.h / 2 - lift, 40);
     }
   }
 
@@ -791,7 +917,7 @@ function drawCustomerArea(ctx, p) {
     drawBar(ctx, pb.x, pb.y, pb.w, pb.h, fraction, barColor, C.BAR_BACK);
     if (c.patience <= 0) {
       // The bar is empty now, so write "LATE" right over it
-      drawText(ctx, CONFIG.TEXT.LATE, pb.x + pb.w / 2, pb.y + pb.h / 2, 13, C.WRONG, 'center', true, C.OUTLINE);
+      drawText(ctx, CONFIG.TEXT.LATE, pb.x + pb.w / 2, pb.y + pb.h / 2, 11, C.WRONG, 'center', true, C.OUTLINE);
     }
   }
 
@@ -882,7 +1008,7 @@ function drawOven(ctx, p) {
     ctx.beginPath();
     ctx.ellipse(o.x, o.y + 8 + bob, 30, 12, 0, 0, Math.PI * 2);
     ctx.fill();
-    drawEmoji(ctx, dishEmoji(oven.dishId), o.x, o.y - 2 + bob, 40);
+    drawDish(ctx, oven.lookId, o.x, o.y - 2 + bob, 40);
     drawText(ctx, CONFIG.TEXT.OVEN_READY, o.x, o.y - half - 10, 14, C.GOLD, 'center', true, C.OUTLINE);
   }
 
@@ -940,7 +1066,8 @@ function drawChef(ctx, p) {
   }
   drawEmoji(ctx, p.emoji, p.x, p.y + bob, size);
 
-  // Carried things float over the chef's head
+  // Carried things float over the chef's head: the plate first, and any
+  // ingredients stacked above it.
   var carryY = p.y - size * 0.75 + bob;
   var itemSize = CONFIG.HELD_ITEM_SIZE;
   if (p.plate !== null) {
@@ -948,13 +1075,72 @@ function drawChef(ctx, p) {
     ctx.beginPath();
     ctx.ellipse(p.x, carryY + 7, 18, 7, 0, 0, Math.PI * 2);
     ctx.fill();
-    drawEmoji(ctx, dishEmoji(p.plate), p.x, carryY, itemSize + 6);
-  } else {
-    for (var i = 0; i < p.held.length; i++) {
-      var ix = p.x + (i - (p.held.length - 1) / 2) * (itemSize + 2);
-      drawEmoji(ctx, ingredientEmoji(p.held[i]), ix, carryY, itemSize);
-    }
+    drawDish(ctx, p.plateLook, p.x, carryY, itemSize + 6);
+    carryY = carryY - itemSize - 6;   // ingredients go above the plate
   }
+  for (var i = 0; i < p.held.length; i++) {
+    var ix = p.x + (i - (p.held.length - 1) / 2) * (itemSize + 2);
+    drawEmoji(ctx, ingredientEmoji(p.held[i]), ix, carryY, itemSize);
+  }
+}
+
+// --- Draw a finished dish. Most dishes are just their emoji, but a dish
+//     with a "drawing" setting in config.js is painted by hand instead. ---
+function drawDish(ctx, dishId, x, y, size) {
+  var dish = findDish(dishId);
+  if (dish !== null && dish.drawing === 'jacket') {
+    drawJacketPotato(ctx, x, y, size);
+  } else {
+    drawEmoji(ctx, dishEmoji(dishId), x, y, size);
+  }
+}
+
+// --- A loaded jacket potato: brown skin, split open, cheese and beans on
+//     top. Drawn centred on (x, y), about "size" pixels wide. ---
+function drawJacketPotato(ctx, x, y, size) {
+  var J = CONFIG.JACKET_POTATO;
+  var s = size;
+
+  // Little helper: fill an oval centred on (cx, cy)
+  function oval(cx, cy, rx, ry, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // The potato's skin, with an outline
+  ctx.beginPath();
+  ctx.ellipse(x, y + s * 0.06, s * 0.5, s * 0.3, 0, 0, Math.PI * 2);
+  ctx.fillStyle = J.SKIN;
+  ctx.fill();
+  ctx.lineWidth = Math.max(1, s * 0.04);
+  ctx.strokeStyle = J.SKIN_EDGE;
+  ctx.stroke();
+
+  // A few dark speckles on the skin
+  oval(x - s * 0.36, y + s * 0.14, s * 0.03, s * 0.02, J.SPECKLE);
+  oval(x + s * 0.34, y + s * 0.18, s * 0.03, s * 0.02, J.SPECKLE);
+  oval(x - s * 0.12, y + s * 0.28, s * 0.03, s * 0.02, J.SPECKLE);
+  oval(x + s * 0.14, y + s * 0.27, s * 0.025, s * 0.02, J.SPECKLE);
+
+  // Split open: the fluffy inside
+  oval(x, y - s * 0.02, s * 0.36, s * 0.15, J.FLESH);
+
+  // Melted cheese, in blobs, with a drip down each side
+  oval(x - s * 0.14, y - s * 0.06, s * 0.16, s * 0.09, J.CHEESE);
+  oval(x + s * 0.14, y - s * 0.06, s * 0.16, s * 0.09, J.CHEESE);
+  oval(x, y - s * 0.1, s * 0.14, s * 0.08, J.CHEESE);
+  oval(x - s * 0.3, y + s * 0.05, s * 0.05, s * 0.08, J.CHEESE);
+  oval(x + s * 0.28, y + s * 0.06, s * 0.05, s * 0.09, J.CHEESE);
+
+  // Beans in sauce, piled in the middle
+  oval(x, y - s * 0.1, s * 0.13, s * 0.07, J.SAUCE);
+  oval(x - s * 0.07, y - s * 0.12, s * 0.045, s * 0.03, J.BEANS);
+  oval(x + s * 0.05, y - s * 0.13, s * 0.045, s * 0.03, J.BEANS);
+  oval(x, y - s * 0.07, s * 0.045, s * 0.03, J.BEANS);
+  oval(x + s * 0.1, y - s * 0.07, s * 0.04, s * 0.028, J.BEANS);
+  oval(x - s * 0.1, y - s * 0.07, s * 0.04, s * 0.028, J.BEANS);
 }
 
 // --- Saboteur strip: the man in the trench coat and his price list ---
@@ -1094,6 +1280,7 @@ function drawTitleScreen(ctx) {
 
   drawText(ctx, T.HOW_TO_PLAY, midX, 305, 16, C.TEXT, 'center', false);
   drawText(ctx, T.HOW_TO_PLAY_2, midX, 332, 16, C.TEXT, 'center', false);
+  drawText(ctx, T.HOW_TO_PLAY_TIP, midX, 357, 14, C.HINT, 'center', false);
 
   drawText(ctx, T.P1_CONTROLS, midX, 385, 17, CONFIG.PLAYERS[0].color, 'center', true);
   drawText(ctx, T.P2_CONTROLS, midX, 415, 17, CONFIG.PLAYERS[1].color, 'center', true);

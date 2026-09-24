@@ -395,6 +395,134 @@ var SOUND = (function () {
 
 
   // ==========================================================================
+  //  BACKGROUND MUSIC
+  // ==========================================================================
+  //
+  //  A short, bouncy tune that loops for as long as a round is on. Like the
+  //  sound effects, it is built from nothing but tones — no music file.
+  //
+  //  The tune is written as lists of notes, one per "step". Each step is half
+  //  a beat long. A note name is a letter plus a number: the letter is the
+  //  note (C D E F G A B) and the number is how high it is — C4 is middle C,
+  //  C5 is one step higher, C3 one lower. '-' means "play nothing here".
+  //
+  //  Change the notes to change the tune. Keep all three lists the same
+  //  length. Speed and loudness are MUSIC_TEMPO and MUSIC_VOLUME in config.js.
+
+  // The tune on top. Four bars, eight steps each.
+  var MELODY = [
+    'C5', 'E5', 'G5', 'E5',   'C6', '-',  'G5', '-',     // bar 1
+    'A4', 'C5', 'E5', 'C5',   'A5', '-',  'E5', '-',     // bar 2
+    'F4', 'A4', 'C5', 'A4',   'F5', '-',  'C5', '-',     // bar 3
+    'G4', 'B4', 'D5', 'B4',   'G5', 'F5', 'E5', 'D5'     // bar 4
+  ];
+
+  // The low bouncing bass line underneath.
+  var BASS = [
+    'C3', '-', 'G3', '-',     'C3', '-', 'G3', '-',
+    'A2', '-', 'E3', '-',     'A2', '-', 'E3', '-',
+    'F2', '-', 'C3', '-',     'F2', '-', 'C3', '-',
+    'G2', '-', 'D3', '-',     'G2', '-', 'D3', '-'
+  ];
+
+  // A little "tss" like a hi-hat cymbal. 'x' = hit, '-' = quiet.
+  var HATS = [
+    '-', 'x', '-', 'x',   '-', 'x', '-', 'x',
+    '-', 'x', '-', 'x',   '-', 'x', '-', 'x',
+    '-', 'x', '-', 'x',   '-', 'x', '-', 'x',
+    '-', 'x', '-', 'x',   '-', 'x', 'x', 'x'
+  ];
+
+  // Turn a note name like 'A4' into a frequency (how many wobbles a second).
+  var NOTE_STEPS = { C: -9, D: -7, E: -5, F: -4, G: -2, A: 0, B: 2 };
+  function noteToFreq(name) {
+    var letter = name.charAt(0);
+    var octave = parseInt(name.substring(1), 10);
+    var stepsFromA4 = NOTE_STEPS[letter] + (octave - 4) * 12;
+    return 440 * Math.pow(2, stepsFromA4 / 12);
+  }
+
+  // Settings from config.js, with safe defaults if they're missing.
+  function musicSetting(name, fallback) {
+    try {
+      if (typeof CONFIG !== 'undefined' && CONFIG[name] != null) {
+        return CONFIG[name];
+      }
+    } catch (err) {}
+    return fallback;
+  }
+
+  var music = {
+    timer: null,      // the repeating "check if more notes are due" timer
+    step: 0,          // which step of the tune comes next
+    nextTime: 0       // when (on the sound engine's clock) that step plays
+  };
+
+  // Play one step of the tune, "start" seconds from now.
+  function playMusicStep(step, start, stepLength) {
+    var v = masterVolume() * musicSetting('MUSIC_VOLUME', 0.6);
+    if (MELODY[step] !== '-') {
+      tone(noteToFreq(MELODY[step]), start, stepLength * 0.9, 'square', 0.05 * v);
+    }
+    if (BASS[step] !== '-') {
+      tone(noteToFreq(BASS[step]), start, stepLength * 1.8, 'triangle', 0.22 * v);
+    }
+    if (HATS[step] === 'x') {
+      noise(start, 0.04, 7000, 0.04 * v);
+    }
+  }
+
+  // Called about 20 times a second. Books any notes due in the next moment.
+  // (Booking slightly ahead keeps the rhythm steady even if the game
+  // stutters for a frame.)
+  function musicTick() {
+    try {
+      if (!ctx) return;
+      var stepLength = 60 / musicSetting('MUSIC_TEMPO', 132) / 2;
+
+      // If the tab was hidden for a while we fell behind — skip ahead
+      // rather than playing every missed note at once.
+      if (music.nextTime < ctx.currentTime - 0.1) {
+        music.nextTime = ctx.currentTime + 0.05;
+      }
+
+      while (music.nextTime < ctx.currentTime + 0.15) {
+        if (!api.muted) {
+          playMusicStep(music.step, music.nextTime - ctx.currentTime, stepLength);
+        }
+        music.step = (music.step + 1) % MELODY.length;
+        music.nextTime = music.nextTime + stepLength;
+      }
+    } catch (err) {
+      // a music hiccup must never take the game down
+    }
+  }
+
+  // Start the tune from the top. Safe to call when it's already playing.
+  function startMusic() {
+    try {
+      if (!musicSetting('MUSIC_ON', true)) return;
+      var context = ensureContext();
+      if (!context) return;
+      stopMusic();
+      music.step = 0;
+      music.nextTime = context.currentTime + 0.1;
+      music.timer = setInterval(musicTick, 50);
+    } catch (err) {}
+  }
+
+  // Stop the tune.
+  function stopMusic() {
+    try {
+      if (music.timer !== null) {
+        clearInterval(music.timer);
+        music.timer = null;
+      }
+    } catch (err) {}
+  }
+
+
+  // ==========================================================================
   //  MUTE
   // ==========================================================================
   //
@@ -417,6 +545,8 @@ var SOUND = (function () {
     play: play,
     unlock: unlock,
     toggleMute: toggleMute,
+    startMusic: startMusic,
+    stopMusic: stopMusic,
     muted: false
   };
 

@@ -45,6 +45,20 @@ function sfx(name) {
   }
 }
 
+// Start / stop the background music. Silently does nothing if sound isn't
+// available. (M mutes the music along with everything else.)
+function startMusic() {
+  if (typeof SOUND !== 'undefined' && SOUND.startMusic) {
+    try { SOUND.startMusic(); } catch (e) {}
+  }
+}
+
+function stopMusic() {
+  if (typeof SOUND !== 'undefined' && SOUND.stopMusic) {
+    try { SOUND.stopMusic(); } catch (e) {}
+  }
+}
+
 // Browsers won't make noise until the player has pressed something. This is
 // called on the first key press to switch sound on.
 function unlockSound() {
