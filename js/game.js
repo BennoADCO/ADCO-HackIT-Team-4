@@ -1,2066 +1,1113 @@
 // ============================================================================
-//  SPUD RUSH — THE GAME
+//  SPUD RUSH: KITCHEN WARS — THE RULES
 // ============================================================================
 //
-//  This is the rulebook. It decides what happens when you press a key, what
-//  a customer wants, when a potato burns, and what gets drawn on screen.
+//  This file is the game itself: what happens when a chef touches a
+//  station, how the oven cooks, how customers pay, how sabotage works, and
+//  how everything is drawn.
 //
-//  Every number it uses comes from config.js. If you want to change how the
-//  game FEELS, edit that file instead of this one.
+//  Every number lives in config.js. If you want to change HOW MUCH or HOW
+//  FAST, go there. Come here to change WHAT HAPPENS.
 //
-//  The file is in sections, marked with big banners like the one above. In
-//  rough order: setup, then the rules, then the drawing.
-//
+//  Map of this file:
+//    1. Game state          — the few things the whole game remembers
+//    2. Setting up a round  — making fresh players, starting, restarting
+//    3. Looking things up   — find a dish or ingredient by its id
+//    4. Update              — moving the game on, a tiny step at a time
+//    5. Stations            — pick up, oven, bin, serving counter
+//    6. Customers           — arriving, waiting, getting served
+//    7. Sabotage            — buying it, and what it does
+//    8. Keys                — single key presses
+//    9. Drawing             — painting everything
+//   10. Go!                 — start the loop
 // ============================================================================
 
-(function () {
-  'use strict';
 
-  // Short name for the settings, so we can write C.CHEF_SPEED instead of
-  // CONFIG.CHEF_SPEED everywhere below.
-  var C = CONFIG;
+// ============================================================================
+//  1. GAME STATE
+// ============================================================================
+
+// Which screen we're on:
+//   'title'   — the start screen
+//   'playing' — the race is on
+//   'over'    — someone reached the target; waiting for R
+var state = 'title';
+
+// The two players. players[0] is P1 (left), players[1] is P2 (right).
+// Each one is an "object" — a bundle of named values, like a form with fields.
+var players = [];
+
+var winnerIndex = -1;     // 0 = P1 won, 1 = P2 won, -1 = nobody yet
+var floatingTexts = [];   // the "+$100" messages drifting up the screen
+var clock = 0;            // seconds since the page opened (for blinking and bobbing)
+
+// Both players get the SAME run of orders (customer 1 wants the same dish
+// for both, customer 2 the same, and so on) so the race is fair.
+// This list grows as customers are needed.
+var dishSequence = [];
 
 
-  // ==========================================================================
-  //  THE PICTURES
-  // ==========================================================================
-  //
-  //  We build a list of every PNG the game needs, then load them all up front.
-  //  If one is missing, the game still runs — that picture is drawn as an
-  //  orange box with its filename in it, so you can see exactly what's absent.
+// ============================================================================
+//  2. SETTING UP A ROUND
+// ============================================================================
 
-  var FILES = [
-    'kitchen_background', 'chef_robot',
-    'customer_1', 'customer_2', 'customer_3', 'customer_4', 'customer_5',
-    'bed_large', 'bed_xlarge', 'bed_poggolithic',
-    'jar_red', 'jar_blue', 'jar_green', 'jar_yellow',
-    'oven', 'bin', 'charging_station', 'parts_table',
-    'overlay_cooked', 'overlay_burnt', 'potato_ruined',
-    'speech_bubble', 'icon_coin', 'icon_heart'
-  ];
+// Build a brand new player from their settings in config.js.
+function makePlayer(index) {
+  var setup = CONFIG.PLAYERS[index];
+  return {
+    index: index,
+    name: setup.name,
+    emoji: setup.emoji,
+    color: setup.color,
+    keys: setup.keys,
+    sabotageKeys: setup.sabotageKeys,
+    offsetX: index * CONFIG.HALF_WIDTH,   // P1 draws at x 0, P2 at x 450
 
-  // Add the fifteen potatoes: every size in every colour.
-  for (var si = 0; si < C.SIZES.length; si++) {
-    for (var ci = 0; ci < C.COLOURS.length; ci++) {
-      FILES.push('potato_' + C.SIZES[si] + '_' + C.COLOURS[ci]);
+    // Where the chef is, inside their own half
+    x: setup.startX,
+    y: setup.startY,
+    moving: false,
+
+    // What the chef is carrying: up to 3 ingredient ids, OR one finished plate
+    held: [],
+    plate: null,          // the id of the dish on the plate, or null for none
+
+    money: 0,
+    points: 0,            // sabotage points
+
+    // Which stations the chef is standing in right now (so a pickup only
+    // happens on the moment you walk IN, not every frame you stand there)
+    inside: {},
+
+    oven: {
+      state: 'empty',     // 'empty', 'cooking' or 'done'
+      dishId: null,       // what will come out
+      contents: [],       // the ingredients that went in (drawn while cooking)
+      timeLeft: 0,
+      totalTime: 0
+    },
+
+    customer: {
+      state: 'empty',     // 'waiting', 'leaving' or 'empty'
+      face: '',
+      dishId: null,       // what they ordered
+      patience: 0,        // seconds of patience left
+      timer: 0,           // counts down while 'leaving' or 'empty'
+      count: 0            // how many customers this player has had
+    },
+
+    sabotage: null,       // the sabotage hitting THIS player, or null
+    announce: null,       // the big "OVEN FREEZE!" message, or null
+    pendingSound: null,   // a sound waiting to play a moment later
+    flash: 0,             // seconds of screen flash left
+    shake: 0              // seconds of screen shake left
+  };
+}
+
+// Wipe everything and set up a fresh round.
+function resetGame() {
+  players = [makePlayer(0), makePlayer(1)];
+  winnerIndex = -1;
+  floatingTexts = [];
+  dishSequence = [];
+  for (var i = 0; i < players.length; i++) {
+    newCustomer(players[i]);
+  }
+}
+
+// Start playing (from the title screen, or R after a win).
+function startGame() {
+  resetGame();
+  state = 'playing';
+  sfx('start');
+}
+
+// Somebody hit the target money.
+function declareWinner(p) {
+  state = 'over';
+  winnerIndex = p.index;
+  sfx('win');
+}
+
+
+// ============================================================================
+//  3. LOOKING THINGS UP
+// ============================================================================
+
+// Find a dish by its id ('burger', 'jacket', 'slop'...). Returns null if none.
+function findDish(id) {
+  if (id === CONFIG.SLOP.id) {
+    return CONFIG.SLOP;
+  }
+  for (var i = 0; i < CONFIG.DISHES.length; i++) {
+    if (CONFIG.DISHES[i].id === id) {
+      return CONFIG.DISHES[i];
+    }
+  }
+  return null;
+}
+
+// Find an ingredient by its id ('patty', 'beans'...). Returns null if none.
+function findIngredient(id) {
+  for (var i = 0; i < CONFIG.INGREDIENTS.length; i++) {
+    if (CONFIG.INGREDIENTS[i].id === id) {
+      return CONFIG.INGREDIENTS[i];
+    }
+  }
+  return null;
+}
+
+function ingredientEmoji(id) {
+  var ingredient = findIngredient(id);
+  if (ingredient === null) return '❓';
+  return ingredient.emoji;
+}
+
+function dishEmoji(id) {
+  var dish = findDish(id);
+  if (dish === null) return '❓';
+  return dish.emoji;
+}
+
+// The list of dishes customers are allowed to order right now.
+function enabledDishes() {
+  var list = [];
+  for (var i = 0; i < CONFIG.DISHES.length; i++) {
+    if (CONFIG.DISHES[i].enabled) {
+      list.push(CONFIG.DISHES[i]);
+    }
+  }
+  return list;
+}
+
+// Do these carried ingredients make an enabled dish? Order doesn't matter.
+// Returns the dish, or null if it's Mystery Slop.
+function matchRecipe(held) {
+  var dishes = enabledDishes();
+  for (var i = 0; i < dishes.length; i++) {
+    var recipe = dishes[i].ingredients;
+    if (recipe.length !== held.length) {
+      continue;
+    }
+    var allThere = true;
+    for (var j = 0; j < recipe.length; j++) {
+      if (held.indexOf(recipe[j]) === -1) {
+        allThere = false;
+      }
+    }
+    if (allThere) {
+      return dishes[i];
+    }
+  }
+  return null;
+}
+
+// Is this particular sabotage currently hitting this player?
+function hasSabotage(p, id) {
+  return p.sabotage !== null && p.sabotage.id === id;
+}
+
+// Find a sabotage's settings by its id ('freeze', 'slip').
+function findSabotage(id) {
+  for (var i = 0; i < CONFIG.SABOTAGES.length; i++) {
+    if (CONFIG.SABOTAGES[i].id === id) {
+      return CONFIG.SABOTAGES[i];
+    }
+  }
+  return null;
+}
+
+// Pop up a little message that drifts up and fades. (x, y) are inside the
+// player's half — we add their offset so it lands in the right kitchen.
+function addFloatingText(p, x, y, text, color, size) {
+  floatingTexts.push({
+    x: p.offsetX + x,
+    y: y,
+    text: text,
+    color: color,
+    size: size || 18,
+    timeLeft: CONFIG.FLOAT_TEXT_SECONDS
+  });
+}
+
+
+// ============================================================================
+//  4. UPDATE — called about 60 times a second with dt (seconds since last)
+// ============================================================================
+
+function update(dt) {
+  clock = clock + dt;
+  updateFloatingTexts(dt);
+
+  // Nothing moves on the title screen or after a win.
+  if (state !== 'playing') {
+    return;
+  }
+
+  for (var i = 0; i < players.length; i++) {
+    var p = players[i];
+    updateSabotageTimers(p, dt);
+    moveChef(p, dt);
+    checkStations(p);
+    updateOven(p, dt);
+    updateCustomer(p, dt);
+
+    // Someone may have just won — stop right here if so.
+    if (state !== 'playing') {
+      return;
+    }
+  }
+}
+
+// Move the chef with their keys.
+function moveChef(p, dt) {
+  var dx = 0;
+  var dy = 0;
+  if (isKeyDown(p.keys.left))  dx = dx - 1;
+  if (isKeyDown(p.keys.right)) dx = dx + 1;
+  if (isKeyDown(p.keys.up))    dy = dy - 1;
+  if (isKeyDown(p.keys.down))  dy = dy + 1;
+
+  // Going diagonally shouldn't be faster than going straight.
+  if (dx !== 0 && dy !== 0) {
+    dx = dx * 0.7071;
+    dy = dy * 0.7071;
+  }
+
+  // 🧈 Slippery Floor: everything is backwards.
+  if (hasSabotage(p, 'slip')) {
+    dx = -dx;
+    dy = -dy;
+  }
+
+  p.x = p.x + dx * CONFIG.CHEF_SPEED * dt;
+  p.y = p.y + dy * CONFIG.CHEF_SPEED * dt;
+
+  // Stay inside your own kitchen.
+  p.x = clamp(p.x, CONFIG.WALK_BOX.left, CONFIG.WALK_BOX.right);
+  p.y = clamp(p.y, CONFIG.WALK_BOX.top, CONFIG.WALK_BOX.bottom);
+
+  p.moving = (dx !== 0 || dy !== 0);
+}
+
+function updateFloatingTexts(dt) {
+  for (var i = floatingTexts.length - 1; i >= 0; i--) {
+    var t = floatingTexts[i];
+    t.timeLeft = t.timeLeft - dt;
+    t.y = t.y - CONFIG.FLOAT_TEXT_RISE * dt;
+    if (t.timeLeft <= 0) {
+      floatingTexts.splice(i, 1);   // remove it from the list
+    }
+  }
+}
+
+
+// ============================================================================
+//  5. STATIONS — what happens when the chef touches things
+// ============================================================================
+
+// Remember whether the chef is standing in a zone, and report whether they
+// have JUST walked in this frame (true only on the first frame inside).
+function updateInside(p, key, nowInside) {
+  var wasInside = (p.inside[key] === true);
+  p.inside[key] = nowInside;
+  return nowInside && !wasInside;
+}
+
+// Is the chef touching a box centred on (x, y), drawn w wide and h tall?
+// Both hitboxes are shrunk to HITBOX_SCALE (75%) to feel generous.
+function chefTouches(p, x, y, w, h) {
+  var chefBox = CONFIG.CHEF_SIZE * CONFIG.HITBOX_SCALE;
+  return boxesOverlap(p.x, p.y, chefBox, chefBox,
+                      x, y, w * CONFIG.HITBOX_SCALE, h * CONFIG.HITBOX_SCALE);
+}
+
+function checkStations(p) {
+  // --- Ingredient stations: pick up ONCE, on the moment you walk in ---
+  for (var i = 0; i < CONFIG.STATIONS.length; i++) {
+    var s = CONFIG.STATIONS[i];
+    var touching = chefTouches(p, s.x, s.y, CONFIG.STATION_SIZE, CONFIG.STATION_SIZE);
+    var justEntered = updateInside(p, 'station' + i, touching);
+    if (justEntered) {
+      tryPickUp(p, s.ingredient);
     }
   }
 
-  var images = {};
+  // The oven, bin and counter only ever act when it would actually do
+  // something (e.g. the oven only takes a FULL armful), so it's safe to
+  // check them every frame you stand there. That way, if you wait on the
+  // oven, you grab the plate the instant it's ready.
 
-  function loadImages() {
-    for (var i = 0; i < FILES.length; i++) {
-      var name = FILES[i];
-      var img = new Image();
-      img.onerror = (function (im) { return function () { im.failed = true; }; })(img);
-      img.src = C.ASSETS + name + '.png';
-      images[name] = img;
-    }
+  // --- Oven ---
+  var o = CONFIG.OVEN;
+  var onOven = chefTouches(p, o.x, o.y, o.size, o.size);
+  var enteredOven = updateInside(p, 'oven', onOven);
+  if (onOven) {
+    useOven(p, enteredOven);
   }
 
-
-  // ==========================================================================
-  //  SMALL HELPERS
-  // ==========================================================================
-
-  // Make a noise. Safe to call anywhere, at any time.
-  //
-  // If sound.js didn't load, or the browser refuses to play audio, this
-  // quietly does nothing instead of stopping the game. That guard is why the
-  // game still runs on a machine with sound locked down.
-  //
-  // Pass { gain: 0.35 } to make it quieter — the helper robots do this so a
-  // busy kitchen doesn't turn into noise soup.
-  function sfx(name, options) {
-    if (typeof SOUND !== 'undefined' && SOUND.play) SOUND.play(name, options);
+  // --- Bin: empties your hands ---
+  var b = CONFIG.BIN;
+  var onBin = chefTouches(p, b.x, b.y, b.size, b.size);
+  updateInside(p, 'bin', onBin);
+  if (onBin && (p.held.length > 0 || p.plate !== null)) {
+    p.held = [];
+    p.plate = null;
+    sfx('bin');
   }
 
-  // The volume helper robots make their noises at.
-  var HELPER_SFX = { gain: C.HELPER_SOUND_GAIN };
+  // --- Serving counter ---
+  var c = CONFIG.COUNTER;
+  var onCounter = chefTouches(p, c.x, c.y, c.w, c.h);
+  var enteredCounter = updateInside(p, 'counter', onCounter);
+  if (onCounter) {
+    useCounter(p, enteredCounter);
+  }
+}
 
-  // Pick one random thing out of a list.
-  function pickOne(list) {
-    return list[Math.floor(Math.random() * list.length)];
+// Walked into an ingredient station.
+function tryPickUp(p, ingredientId) {
+  if (p.plate !== null) return;                        // hands full with a plate
+  if (p.held.length >= CONFIG.MAX_HELD) return;        // already carrying 3
+  if (p.held.indexOf(ingredientId) !== -1) return;     // already got this one
+  p.held.push(ingredientId);
+  sfx('pickup');
+}
+
+// Standing on the oven. justEntered = this is the first frame on it.
+function useOven(p, justEntered) {
+  var oven = p.oven;
+  var o = CONFIG.OVEN;
+
+  // 🧊 Frozen shut: can't put anything in or take anything out.
+  if (hasSabotage(p, 'freeze')) {
+    if (justEntered) {
+      addFloatingText(p, o.x, o.y - 55, CONFIG.TEXT.HINT_FROZEN, CONFIG.COLORS.FROZEN_TINT);
+    }
+    return;
   }
 
-  // Read the saved high score. This is wrapped in try/catch because saving is
-  // sometimes blocked when the game is opened straight off the disk — if that
-  // happens we just start from zero rather than crashing.
-  function loadBestScore() {
-    try { return Number(localStorage.getItem('spudrush.best')) || 0; }
-    catch (err) { return 0; }
+  if (oven.state === 'empty') {
+    if (p.plate === null && p.held.length === CONFIG.MAX_HELD) {
+      loadOven(p);
+    } else if (justEntered && p.plate === null && p.held.length > 0) {
+      addFloatingText(p, o.x, o.y - 55, CONFIG.TEXT.HINT_NEED_3, CONFIG.COLORS.HINT);
+    }
+  } else if (oven.state === 'done') {
+    if (p.plate === null && p.held.length === 0) {
+      p.plate = oven.dishId;
+      oven.state = 'empty';
+      oven.dishId = null;
+      oven.contents = [];
+      sfx('plateUp');
+    } else if (justEntered) {
+      addFloatingText(p, o.x, o.y - 55, CONFIG.TEXT.HINT_HANDS_FULL, CONFIG.COLORS.HINT);
+    }
+  }
+}
+
+// Put the 3 carried ingredients in the oven and start cooking.
+function loadOven(p) {
+  var oven = p.oven;
+  var dish = matchRecipe(p.held);
+  if (dish === null) {
+    dish = CONFIG.SLOP;   // no recipe matched: 🤢
+  }
+  oven.state = 'cooking';
+  oven.dishId = dish.id;
+  oven.contents = p.held;
+  oven.totalTime = dish.cookSeconds;
+  oven.timeLeft = dish.cookSeconds;
+  p.held = [];
+  sfx('ovenLoad');
+}
+
+// Tick the oven's cooking timer.
+function updateOven(p, dt) {
+  var oven = p.oven;
+  if (oven.state !== 'cooking') return;
+  if (hasSabotage(p, 'freeze')) return;   // 🧊 the timer stops dead
+
+  oven.timeLeft = oven.timeLeft - dt;
+  if (oven.timeLeft <= 0) {
+    oven.timeLeft = 0;
+    oven.state = 'done';
+    sfx('ovenDone');
+  }
+}
+
+// Standing at the serving counter.
+function useCounter(p, justEntered) {
+  if (p.plate !== null && p.customer.state === 'waiting') {
+    serveCustomer(p);
+  } else if (justEntered && p.plate === null && p.held.length > 0) {
+    addFloatingText(p, CONFIG.COUNTER.x, CONFIG.COUNTER.y + 40, CONFIG.TEXT.HINT_COOK_FIRST, CONFIG.COLORS.HINT);
+  }
+}
+
+
+// ============================================================================
+//  6. CUSTOMERS
+// ============================================================================
+
+// A new customer steps up to this player's counter.
+function newCustomer(p) {
+  var c = p.customer;
+  var n = c.count;
+
+  // Make sure the shared order list is long enough, then read this
+  // player's next order from it.
+  while (dishSequence.length <= n) {
+    var dishes = enabledDishes();
+    if (dishes.length === 0) {
+      dishes = CONFIG.DISHES;   // safety net if every dish was switched off
+    }
+    dishSequence.push(randomItem(dishes).id);
   }
 
-  function saveBestScore(value) {
-    try { localStorage.setItem('spudrush.best', value); }
-    catch (err) { /* Saving is blocked. Not a problem — carry on. */ }
+  c.state = 'waiting';
+  c.dishId = dishSequence[n];
+  c.face = randomItem(CONFIG.CUSTOMER_FACES);
+  c.patience = CONFIG.CUSTOMER_PATIENCE_SECONDS;
+  c.timer = 0;
+  c.count = n + 1;
+}
+
+function updateCustomer(p, dt) {
+  var c = p.customer;
+
+  if (c.state === 'waiting') {
+    // Patience drains. At zero they get grumpy, but they never walk off.
+    if (c.patience > 0) {
+      c.patience = c.patience - dt;
+      if (c.patience <= 0) {
+        c.patience = 0;
+        c.face = CONFIG.FACE_IMPATIENT;
+      }
+    }
+  } else if (c.state === 'leaving') {
+    c.timer = c.timer - dt;
+    if (c.timer <= 0) {
+      c.state = 'empty';
+      c.timer = CONFIG.CUSTOMER_GAP_SECONDS;
+    }
+  } else if (c.state === 'empty') {
+    c.timer = c.timer - dt;
+    if (c.timer <= 0) {
+      newCustomer(p);
+    }
   }
-
-
-  // ==========================================================================
-  //  THE GAME OBJECT
-  // ==========================================================================
-
-  function Game(canvas) {
-    this.canvas = canvas;
-    this.ctx = canvas.getContext('2d');
-    this.keysHeld = {};
-    this.bestScore = loadBestScore();
-
-    this.reset();
-    this.mode = 'title';   // 'title', 'play', 'paused' or 'over'
-  }
-
-
-  // --------------------------------------------------------------------------
-  //  Starting (or restarting) a round
-  // --------------------------------------------------------------------------
-
-  // One chef — one player's robot. Everything that belongs to ONE player
-  // lives in here; everything the two players share (coins, lives, the
-  // kitchen itself) lives on the game.
-  function makeChef(number, label, x, y, colour, keys) {
-    return {
-      isChef: true,
-      number: number,         // 1 or 2 — the label drawn over its head
-      label: label,           // 'P1' or 'P2' — by its battery in the corner
-      colour: colour,         // its ring, label, battery label and glow
-      keys: keys,             // which keys drive it (from config.js)
-      x: x, y: y,             // where its FEET are
-      walkPhase: 0,           // the little bob while walking
-      holding: null,          // the potato in its hands, or null
-      carrying: null,         // a flat robot (helper or chef) on its shoulders
-      battery: 100,           // percent full. Always starts topped up.
-      charging: false,        // is it standing on the pad this instant?
-      lowBeep: 0,             // countdown to the next flat-battery nag
-      chargeBeep: 0,          // countdown to the next charging shimmer
-      flat: false,            // battery ran out: collapsed, keys do nothing
-      carried: false,         // being carried by the other chef right now
-      // What this chef's action key would do right now (see findTarget).
-      nearest: null, nearestDrop: null, nearestFlat: null
-    };
-  }
-
-  Game.prototype.reset = function () {
-    // The two chefs, one per player.
-    this.chefs = [
-      makeChef(1, C.HUD_P1, C.P1_START_X, C.P1_START_Y, C.P1_COLOUR, C.P1_KEYS),
-      makeChef(2, C.HUD_P2, C.P2_START_X, C.P2_START_Y, C.P2_COLOUR, C.P2_KEYS)
-    ];
-    this.dropped = [];           // potatoes left lying on the kitchen floor
-
-    // The two ovens.
-    this.ovens = C.OVEN_POSITIONS.map(function (pos) {
-      return { type: 'oven', x: pos.x, y: pos.y, w: C.OVEN_WIDTH, h: C.OVEN_HEIGHT,
-               potato: null, timeIn: 0,
-               // Remembered so we can chime the moment it CHANGES stage.
-               lastDoneness: 'raw' };
-    });
-
-    // The three garden beds, stacked down the left wall.
-    this.beds = C.SIZES.map(function (size, i) {
-      return { type: 'bed', size: size,
-               x: C.BED_X, y: C.BED_TOP + i * C.BED_GAP,
-               w: C.BED_WIDTH, h: C.BED_HEIGHT, picture: 'bed_' + size };
-    });
-
-    // The four paint jars, stacked down the right wall.
-    this.jars = C.JAR_COLOURS.map(function (colour, i) {
-      return { type: 'jar', colour: colour,
-               x: C.JAR_X, y: C.JAR_TOP + i * C.JAR_GAP,
-               w: C.JAR_WIDTH, h: C.JAR_HEIGHT, picture: 'jar_' + colour };
-    });
-
-    this.bin = { type: 'bin', x: C.BIN_X, y: C.BIN_Y, w: C.BIN_WIDTH, h: C.BIN_HEIGHT };
-
-    // The charging pad. Note it is deliberately NOT in the station list below —
-    // you don't press a key to use it, you just walk onto it.
-    this.charger = { x: C.CHARGER_X, y: C.CHARGER_Y,
-                     w: C.CHARGER_WIDTH, h: C.CHARGER_HEIGHT };
-
-    // The spots in the hatch where customers appear.
-    // Each bay has TWO positions, and they are deliberately different.
-    //
-    //   drawX  — where the customer is drawn, spread across the hatch.
-    //   x / w  — where the chef has to stand to serve them, spread across the
-    //            walkable floor instead.
-    //
-    // They differ because the hatch is wider than the floor you can walk on.
-    // If we used the hatch position for both, the customers at each end would
-    // be literally impossible to reach.
-    this.bays = [];
-    this.customers = [];
-    var serveWidth = (C.WALK_RIGHT - C.WALK_LEFT) / C.BAY_COUNT;
-    for (var b = 0; b < C.BAY_COUNT; b++) {
-      this.bays.push({ type: 'bay', index: b,
-                       drawX: C.HATCH_X + b * C.BAY_WIDTH,
-                       x: C.WALK_LEFT + b * serveWidth, y: C.HATCH_Y,
-                       w: serveWidth, h: C.BAY_REACH_HEIGHT });
-      this.customers.push(null);
-    }
-
-    // One flat list of everything the chef can walk up to and use.
-    // The parts table, where you buy helper robots.
-    this.partsTable = { type: 'parts', x: C.PARTS_X, y: C.PARTS_Y,
-                        w: C.PARTS_WIDTH, h: C.PARTS_HEIGHT };
-
-    // Helper robots. Always empty at the start of a round — they do not
-    // survive a restart, so run two is never easier than run one.
-    this.helpers = [];
-    this.helperCost = C.HELPER_FIRST_COST;
-
-    this.stations = this.beds.concat(this.jars, [this.bin], this.ovens,
-                                     [this.partsTable], this.bays);
-
-    // Work out, once, where a robot has to stand to use each station: the
-    // point inside the walk box closest to that station's rectangle.
-    var self2 = this;
-    this.stations.forEach(function (s) { s.spot = self2.standingSpot(s); });
-
-    this.coins = 0;              // shared by both players — this is the score
-    this.strikes = 0;            // shared too
-    this.overReason = 'strikes'; // why the last round ended
-    this.elapsed = 0;
-    this.untilNextCustomer = 0.6;
-    this.ordersMade = 0;
-
-    this.puffs = [];        // little dust and steam dots
-    this.popups = [];       // the "+20" numbers that float up
-
-    this.mode = 'play';
-    sfx('newRound');
-  };
-
-
-  // ==========================================================================
-  //  HELPER ROBOTS
-  // ==========================================================================
-  //
-  //  A helper is a second robot that works on its own. It picks a customer,
-  //  then walks the same route you would: bed, then paint, then oven, then
-  //  the hatch. It is a simple list of steps — see helperThink below.
-  //
-  //  Helpers run on batteries. A flat one collapses until you carry it to the
-  //  charging pad. They are lost when the round restarts.
-
-  // The four states of doneness, in order, so we can tell "past it" from
-  // "not there yet" when a potato is sitting in the oven.
-  var DONENESS_ORDER = ['raw', 'cooked', 'burnt', 'ruined'];
-
-  // Where does a robot have to stand to use this station? It's the point
-  // inside the walkable box that is closest to the station's rectangle.
-  Game.prototype.standingSpot = function (s) {
-    var x, y;
-
-    if (s.x + s.w < C.WALK_LEFT) x = C.WALK_LEFT;
-    else if (s.x > C.WALK_RIGHT) x = C.WALK_RIGHT;
-    else x = Math.max(C.WALK_LEFT, Math.min(C.WALK_RIGHT, s.x + s.w / 2));
-
-    if (s.y + s.h < C.WALK_TOP) y = C.WALK_TOP;
-    else if (s.y > C.WALK_BOTTOM) y = C.WALK_BOTTOM;
-    else y = Math.max(C.WALK_TOP, Math.min(C.WALK_BOTTOM, s.y + s.h / 2));
-
-    return { x: x, y: y };
-  };
-
-  Game.prototype.spawnHelper = function () {
-    var table = this.partsTable;
-    this.helpers.push({
-      x: table.x + table.w / 2,
-      y: table.y + table.h + 12,
-      holding: null,
-      battery: 100,       // flat = collapses until the player carries it to the pad
-      carried: false,
-      state: 'idle',
-      station: null,      // the station it is walking to
-      bay: -1,            // the customer it has claimed, or -1
-      oven: null,         // the oven it has claimed, or null
-      order: null,        // a copy of what that customer asked for
-      pause: 0.6,
-      walkPhase: 0,
-      tint: C.HELPER_TINTS[this.helpers.length % C.HELPER_TINTS.length]
-    });
-    this.puff(table.x + table.w / 2, table.y + table.h, C.CHARGE_SPARK, 14);
-    sfx('build');
-  };
-
-  // Is another helper already dealing with this customer?
-  Game.prototype.bayTaken = function (index, exclude) {
-    for (var i = 0; i < this.helpers.length; i++) {
-      var h = this.helpers[i];
-      if (h !== exclude && h.bay === index) return true;
-    }
-    return false;
-  };
-
-  // Walk towards a point. Returns true once we've arrived.
-  Game.prototype.walkHelper = function (h, target, seconds) {
-    var dx = target.x - h.x, dy = target.y - h.y;
-    var gap = Math.sqrt(dx * dx + dy * dy);
-    if (gap < 3) { h.walkPhase = 0; return true; }
-
-    var speed = C.CHEF_SPEED * C.HELPER_SPEED;
-    var move = Math.min(gap, speed * seconds);
-    h.x += (dx / gap) * move;
-    h.y += (dy / gap) * move;
-    h.walkPhase += seconds * 14;
-    return false;
-  };
-
-  // Let go of the oven this helper had claimed.
-  //
-  // If the helper's own potato is still in there cooking, it gets marked
-  // "orphaned": nobody is coming back for it. Without that mark it would sit
-  // in the oven burning for ever, and no helper would ever use that oven
-  // again. With it, the next free helper knows to take it out and bin it.
-  //
-  // Only a helper that is 'waiting' has its own potato in the oven. A potato
-  // YOU put in is never marked, so no helper will ever touch it.
-  Game.prototype.releaseOven = function (h) {
-    if (!h.oven) return;
-    if (h.state === 'waiting' && h.oven.potato) h.oven.potato.orphaned = true;
-    h.oven.claimedBy = null;
-    h.oven = null;
-  };
-
-  // Give up on the current job. Anything still in hand goes in the bin.
-  Game.prototype.helperAbandon = function (h) {
-    h.bay = -1;
-    h.order = null;
-    this.releaseOven(h);
-    h.state = h.holding ? 'toBin' : 'idle';
-    h.station = h.holding ? this.bin : null;
-  };
-
-  // A helper has run out of power. It drops whatever it was holding and lies
-  // there until the player picks it up and carries it to the charging pad.
-  Game.prototype.helperCollapse = function (h) {
-    if (h.holding) {
-      this.dropped.push({ potato: h.holding, x: h.x, y: h.y });
-      h.holding = null;
-    }
-    h.bay = -1;
-    h.order = null;
-    this.releaseOven(h);
-    h.state = 'flat';
-    h.station = null;
-    this.puff(h.x, h.y - 20, '#8a7f78', 8);
-  };
-
-  // Work out the next step for one helper. Called once per frame each.
-  Game.prototype.helperThink = function (h, seconds) {
-    // Collapsed, or slung over the player's shoulder: no thinking either way.
-    if (h.state === 'flat' || h.carried) return;
-
-    // Helpers run their batteries down just like you do.
-    h.battery -= (100 / C.HELPER_BATTERY_LASTS) * seconds;
-    if (h.battery <= 0) { h.battery = 0; this.helperCollapse(h); return; }
-
-    if (h.pause > 0) { h.pause -= seconds; return; }
-
-    var order = h.order;
-
-    // At every step, check the job still exists. The player may have served
-    // this customer, or they may have run out of patience and left.
-    // (A helper with no customer — idle, binning, or emptying an oven — has
-    // nothing to check.)
-    if (h.bay !== -1) {
-      var customer = this.customers[h.bay];
-      if (!customer || customer.state === 'leaving') { this.helperAbandon(h); return; }
-    }
-
-    // --- Nothing to do: find some work --------------------------------------
-    if (h.state === 'idle') {
-      // First job: any potato left behind in an oven by a helper that gave up
-      // or went flat. Until it's gone, that oven is out of action for every
-      // helper, so clearing it comes before taking a new order.
-      if (!h.holding) {
-        for (var o = 0; o < this.ovens.length; o++) {
-          var jammed = this.ovens[o];
-          if (jammed.potato && jammed.potato.orphaned && !jammed.claimedBy) {
-            jammed.claimedBy = h;
-            h.oven = jammed;
-            h.station = jammed;
-            h.state = 'toClear';
-            return;
-          }
-        }
-      }
-
-      // Otherwise, a customer nobody else has claimed.
-      for (var i = 0; i < this.customers.length; i++) {
-        var c = this.customers[i];
-        if (!c || c.state === 'leaving' || this.bayTaken(i, h)) continue;
-        h.bay = i;
-        h.order = { size: c.order.size, colour: c.order.colour, doneness: c.order.doneness };
-        h.state = 'toBed';
-        h.station = this.beds[C.SIZES.indexOf(c.order.size)];
-        return;
-      }
-      return;   // no work going; stand still
-    }
-
-    // --- Walking to the bin -------------------------------------------------
-    if (h.state === 'toBin') {
-      if (this.walkHelper(h, this.bin.spot, seconds)) {
-        h.holding = null;
-        h.state = 'idle';
-        h.station = null;
-        h.pause = C.HELPER_PAUSE;
-        this.puff(this.bin.x + 30, this.bin.y + 14, C.BIN_PUFF, 6);
-        sfx('bin', HELPER_SFX);
-      }
-      return;
-    }
-
-    // --- Off to empty an oven that somebody left a potato in ----------------
-    if (h.state === 'toClear') {
-      var oven = h.oven;
-
-      // You may have taken it out yourself while we were walking over. If so,
-      // never mind — and never touch a potato YOU have put in since.
-      if (!oven.potato || !oven.potato.orphaned) {
-        oven.claimedBy = null;
-        h.oven = null;
-        h.station = null;
-        h.state = 'idle';
-        return;
-      }
-
-      if (!this.walkHelper(h, oven.spot, seconds)) return;
-
-      // Take it out, then off to the bin with it. That frees the oven.
-      oven.potato.doneness = this.donenessAt(oven.timeIn);
-      oven.potato.orphaned = false;
-      h.holding = oven.potato;
-      oven.potato = null;
-      oven.claimedBy = null;
-      h.oven = null;
-      h.pause = C.HELPER_PAUSE;
-      h.state = 'toBin';
-      h.station = this.bin;
-      sfx('ovenOut', HELPER_SFX);
-      return;
-    }
-
-    // --- Off to the garden bed ----------------------------------------------
-    if (h.state === 'toBed') {
-      if (!this.walkHelper(h, h.station.spot, seconds)) return;
-      h.holding = { size: order.size, colour: 'natural', doneness: 'raw' };
-      this.puff(h.x, h.y - 20, C.SOIL_PUFF, 5);
-      sfx('dig', HELPER_SFX);
-      h.pause = C.HELPER_PAUSE;
-      this.helperNextAfterPotato(h);
-      return;
-    }
-
-    // --- Off to the paint jar -----------------------------------------------
-    if (h.state === 'toJar') {
-      if (!this.walkHelper(h, h.station.spot, seconds)) return;
-      h.holding.colour = order.colour;
-      this.puff(h.station.x + h.station.w / 2, h.station.y + h.station.h / 4,
-                C.PAINT_SPLASH[order.colour], 6);
-      sfx('dunk', HELPER_SFX);
-      h.pause = C.HELPER_PAUSE;
-      this.helperNextAfterPaint(h);
-      return;
-    }
-
-    // --- Off to an oven -----------------------------------------------------
-    if (h.state === 'toOven') {
-      // Claim a free oven. If both are busy, wait rather than dithering.
-      if (!h.oven) {
-        for (var k = 0; k < this.ovens.length; k++) {
-          var candidate = this.ovens[k];
-          if (!candidate.potato && !candidate.claimedBy) {
-            candidate.claimedBy = h;
-            h.oven = candidate;
-            h.station = candidate;
-            break;
-          }
-        }
-        if (!h.oven) return;   // both ovens busy — hold position
-      }
-
-      if (!this.walkHelper(h, h.oven.spot, seconds)) return;
-
-      // Someone beat us to it while we were walking.
-      if (h.oven.potato) { h.oven.claimedBy = null; h.oven = null; return; }
-
-      h.oven.potato = h.holding;
-      h.oven.timeIn = this.timerForDoneness(h.holding.doneness);
-      h.oven.lastDoneness = this.donenessAt(h.oven.timeIn);
-      h.holding = null;
-      h.state = 'waiting';
-      sfx('ovenIn', HELPER_SFX);
-      return;
-    }
-
-    // --- Standing at the oven, watching it cook -----------------------------
-    if (h.state === 'waiting') {
-      if (!h.oven) { this.helperAbandon(h); return; }
-
-      // The player has taken our potato out. Start over.
-      if (!h.oven.potato) {
-        h.oven.claimedBy = null;
-        h.oven = null;
-        h.state = 'toBed';
-        h.station = this.beds[C.SIZES.indexOf(order.size)];
-        return;
-      }
-
-      var now = this.donenessAt(h.oven.timeIn);
-      var wantedAt = DONENESS_ORDER.indexOf(order.doneness);
-      var nowAt = DONENESS_ORDER.indexOf(now);
-      if (nowAt < wantedAt) return;   // not ready yet — keep waiting
-
-      // Ready, or we've overshot. Either way, take it out.
-      h.oven.potato.doneness = now;
-      h.holding = h.oven.potato;
-      h.oven.potato = null;
-      h.oven.claimedBy = null;
-      h.oven = null;
-      h.pause = C.HELPER_PAUSE;
-
-      if (nowAt > wantedAt) { h.state = 'toBin'; h.station = this.bin; return; }
-
-      h.state = 'toCustomer';
-      h.station = this.bays[h.bay];
-      return;
-    }
-
-    // --- Off to the hatch to hand it over ------------------------------------
-    if (h.state === 'toCustomer') {
-      if (!this.walkHelper(h, this.bays[h.bay].spot, seconds)) return;
-      this.serveCustomer(h.bay, h.holding, this.bays[h.bay].drawX + C.BAY_WIDTH / 2);
-      h.holding = null;
-      h.bay = -1;
-      h.order = null;
-      h.state = 'idle';
-      h.station = null;
-      h.pause = C.HELPER_PAUSE;
-    }
-  };
-
-  // After picking a potato: paint it, cook it, or take it straight over.
-  Game.prototype.helperNextAfterPotato = function (h) {
-    if (h.order.colour !== 'natural') {
-      h.state = 'toJar';
-      h.station = this.jars[C.JAR_COLOURS.indexOf(h.order.colour)];
-      return;
-    }
-    this.helperNextAfterPaint(h);
-  };
-
-  // After painting: cook it, or take it straight over.
-  Game.prototype.helperNextAfterPaint = function (h) {
-    if (h.order.doneness !== 'raw') {
-      h.state = 'toOven';
-      h.station = null;
-      h.oven = null;
-      return;
-    }
-    h.state = 'toCustomer';
-    h.station = this.bays[h.bay];
-  };
-
-
-  // --------------------------------------------------------------------------
-  //  The battery
-  // --------------------------------------------------------------------------
-
-  // How fast a chef walks right now. A full battery is full speed; a flat
-  // one is BATTERY_SLOWEST of that. It slides smoothly between the two, so
-  // you feel yourself getting sluggish long before you actually run out.
-  Game.prototype.currentSpeed = function (chef) {
-    var charge = Math.max(0, Math.min(1, chef.battery / 100));
-    return C.CHEF_SPEED * (C.BATTERY_SLOWEST + (1 - C.BATTERY_SLOWEST) * charge);
-  };
-
-  // Is this chef standing close enough to the base of the charging pad?
-  // This is measured as a circle around the bottom of the pad rather than the
-  // whole rectangle, so it charges when it's standing AT it, not behind it.
-  Game.prototype.onCharger = function (chef) {
-    var pad = this.charger;
-    var padX = pad.x + pad.w / 2;
-    var padY = pad.y + pad.h - 6;
-    var dx = chef.x - padX;
-    var dy = chef.y - padY;
-    return Math.sqrt(dx * dx + dy * dy) < C.CHARGER_GRIP;
-  };
-
-  // Is this robot — a helper or a chef — lying flat, waiting to be carried?
-  function isFlat(robot) {
-    return robot.isChef ? robot.flat : robot.state === 'flat';
-  }
-
-  // A chef's battery has run out. Just like a helper, it drops whatever it
-  // had in its hands and lies there until the OTHER chef carries it to the
-  // charging pad. If both chefs are flat at once, the round is over.
-  Game.prototype.chefCollapse = function (chef) {
-    chef.battery = 0;
-    chef.flat = true;
-    chef.walkPhase = 0;
-
-    if (chef.holding) {
-      this.dropped.push({ potato: chef.holding, x: chef.x, y: chef.y });
-      chef.holding = null;
-    }
-    // Anything on its shoulders is put down where it fell — still flat.
-    if (chef.carrying) {
-      chef.carrying.carried = false;
-      chef.carrying.x = chef.x;
-      chef.carrying.y = chef.y;
-      chef.carrying = null;
-    }
-
-    this.puff(chef.x, chef.y - 20, '#8a7f78', 10);
-    sfx('powerDown');
-
-    var allFlat = true;
-    for (var i = 0; i < this.chefs.length; i++) {
-      if (!this.chefs[i].flat) allFlat = false;
-    }
-    if (allFlat) this.endRound('battery');
-  };
-
-  // A chef has carried a flat robot — a helper or the other chef — onto the
-  // charging pad. It wakes up with a full battery, standing just in front.
-  Game.prototype.revive = function (robot) {
-    robot.battery = 100;
-    robot.carried = false;
-    robot.x = this.charger.x + this.charger.w / 2;
-    robot.y = this.charger.y + this.charger.h + 14;
-
-    if (robot.isChef) {
-      robot.flat = false;
-      robot.walkPhase = 0;
-    } else {
-      robot.state = 'idle';
-      robot.pause = 0.4;
-    }
-    this.puff(robot.x, robot.y - 20, C.CHARGE_SPARK, 14);
-  };
-
-
-  // --------------------------------------------------------------------------
-  //  How cooked is it?
-  // --------------------------------------------------------------------------
-
-  // Given how many seconds a potato has been in the oven, what state is it in?
-  Game.prototype.donenessAt = function (seconds) {
-    if (seconds < C.OVEN_COOKED_AT) return 'raw';
-    if (seconds < C.OVEN_BURNT_AT) return 'cooked';
-    if (seconds < C.OVEN_RUINED_AT) return 'burnt';
-    return 'ruined';
-  };
-
-  // The reverse: if a potato is already 'cooked' and you put it back in the
-  // oven, the timer needs to resume from the right place rather than zero.
-  Game.prototype.timerForDoneness = function (doneness) {
-    if (doneness === 'cooked') return C.OVEN_COOKED_AT;
-    if (doneness === 'burnt') return C.OVEN_BURNT_AT;
-    if (doneness === 'ruined') return C.OVEN_RUINED_AT;
-    return 0;
-  };
-
-
-  // --------------------------------------------------------------------------
-  //  Deciding what a customer wants
-  // --------------------------------------------------------------------------
-  //
-  //  The first four orders are fixed, and deliberately gentle. They teach the
-  //  game one station at a time: first just a potato, then paint, then the
-  //  oven, then a combination. After that it goes random.
-
-  Game.prototype.makeOrder = function () {
-    var n = this.ordersMade;
-    this.ordersMade++;
-
-    if (n === 0) return { size: 'large', colour: 'natural', doneness: 'raw' };
-    if (n === 1) return { size: 'large', colour: 'red', doneness: 'raw' };
-    if (n === 2) return { size: pickOne(C.SIZES), colour: 'natural', doneness: 'cooked' };
-    if (n === 3) return { size: pickOne(C.SIZES), colour: pickOne(C.JAR_COLOURS), doneness: 'raw' };
-
-    // From the fifth order on, anything goes.
-    var roll = Math.random();
-    return {
-      size: pickOne(C.SIZES),
-      colour: Math.random() < 0.2 ? 'natural' : pickOne(C.JAR_COLOURS),
-      doneness: roll < 0.3 ? 'raw' : roll < 0.7 ? 'cooked' : 'burnt'
-    };
-  };
-
-
-  // --------------------------------------------------------------------------
-  //  Customers arriving and leaving
-  // --------------------------------------------------------------------------
-
-  Game.prototype.spawnCustomer = function () {
-    // Which bays are empty?
-    var free = [];
-    for (var i = 0; i < this.customers.length; i++) if (!this.customers[i]) free.push(i);
-    if (free.length === 0) return false;
-
-    // The very first customer always uses the left-hand bay so they're easy
-    // to spot. After that it's random.
-    var bay = this.ordersMade === 0 ? 0 : pickOne(free);
-
-    // Try not to show the same robot face twice at once. There are only five
-    // faces and there can be more customers than that, so once they're all
-    // in use we just pick any of them rather than ending up with no face.
-    var facesInUse = this.customers.filter(Boolean).map(function (c) { return c.face; });
-    var freeFaces = [1, 2, 3, 4, 5].filter(function (f) { return facesInUse.indexOf(f) === -1; });
-    var face = pickOne(freeFaces.length ? freeFaces : [1, 2, 3, 4, 5]);
-
-    // Patience shrinks as the game goes on. The first two customers get extra.
-    var ramp = Math.max(C.PATIENCE_SHORTEST, 1 - this.elapsed / C.PATIENCE_RAMP_SECONDS);
-    var beginnerBonus = this.ordersMade < 2 ? C.BEGINNER_PATIENCE_BONUS : 1;
-    var patience = C.PATIENCE * ramp * beginnerBonus;
-
-    this.customers[bay] = {
-      face: face,
-      order: this.makeOrder(),
-      patience: patience,
-      patienceMax: patience,
-      state: 'arriving',      // 'arriving', 'waiting' or 'leaving'
-      stateTime: 0
-    };
-    sfx('arrive');
-    return true;
-  };
-
-  Game.prototype.customerLeaves = function (index, mood) {
-    var customer = this.customers[index];
-    customer.state = 'leaving';
-    customer.mood = mood;
-    customer.stateTime = 0;
-
-    if (mood !== 'angry') return;
-
-    this.strikes++;
-    this.showPopup(this.bays[index].drawX + C.BAY_WIDTH / 2, 60, 'X', '#e0483c');
-    sfx('strike');
-
-    if (this.strikes >= C.STRIKES_ALLOWED) this.endRound('strikes');
-  };
-
-
-  // Ends the round, whatever ended it, and remembers the high score.
-  // 'reason' is either 'strikes' or 'battery' — it only changes the wording
-  // on the game-over screen.
-  Game.prototype.endRound = function (reason) {
-    this.mode = 'over';
-    this.overReason = reason;
-
-    // A flat battery is a robot winding down; running out of lives is the
-    // kitchen closing. They sound different so you know which happened.
-    sfx(reason === 'battery' ? 'powerDown' : 'gameOver');
-
-    if (this.coins > this.bestScore) {
-      this.bestScore = this.coins;
-      saveBestScore(this.bestScore);
-    }
-  };
-
-
-  // --------------------------------------------------------------------------
-  //  Little visual effects
-  // --------------------------------------------------------------------------
-
-  Game.prototype.showPopup = function (x, y, text, colour) {
-    this.popups.push({ x: x, y: y, text: text, colour: colour, life: 1.1 });
-  };
-
-  Game.prototype.puff = function (x, y, colour, count) {
-    for (var i = 0; i < count; i++) {
-      this.puffs.push({
-        x: x, y: y,
-        vx: (Math.random() - 0.5) * 80,
-        vy: -Math.random() * 70 - 10,
-        life: 0.5, lifeMax: 0.5,
-        radius: 2 + Math.random() * 2.5,
-        colour: colour
-      });
-    }
-  };
-
-
-  // ==========================================================================
-  //  WHAT WILL THE ACTION KEY DO? — worked out fresh every frame, per chef
-  // ==========================================================================
-  //
-  //  Each player's action key (E for player 1, 7 for player 2) does exactly
-  //  one thing, and it is always the thing glowing in that player's colour.
-  //  This section decides what that thing is, separately for each chef. The
-  //  drawing code puts a ring round it, and useStation() below does it. Both
-  //  read the same answer, so the glow and the key can never disagree.
-  //
-  //  Each chef's answer depends only on where THAT chef is and what it is
-  //  holding — never on what the other player just pressed.
-  //
-  //  Things are checked in this order, and the first match wins:
-  //
-  //    1. Flat, or being carried?         The key does nothing at all.
-  //    2. Carrying a flat robot?          The key puts it down. Nothing else
-  //                                       counts, so you can never get stuck.
-  //    3. Empty hands, by a flat robot (a helper, or the other chef)?
-  //                                       The key lifts it onto your shoulders.
-  //    4. Empty hands, by a potato lying on the floor?   The key picks it up.
-  //    5. Next to a station?              The key uses it — but only if there
-  //                                       is something to do there. If not,
-  //                                       nothing glows and nothing happens.
-  //    6. Holding a potato, with no station near?   The key puts it down on
-  //                                       the floor.
-
-  // How far a chef's feet are from a station.
-  //
-  // Most stations sit against a wall, so this is the gap to the nearest edge
-  // of the station's rectangle. The parts table stands out on the open floor,
-  // so it is measured from one spot instead — the middle of its front edge.
-  Game.prototype.gapTo = function (chef, s) {
-    var nx, ny;
-
-    if (s.type === 'parts') {
-      nx = s.x + s.w / 2;
-      ny = s.y + s.h;
-    } else {
-      nx = Math.max(s.x, Math.min(s.x + s.w, chef.x));
-      ny = Math.max(s.y, Math.min(s.y + s.h, chef.y));
-    }
-
-    var dx = nx - chef.x, dy = ny - chef.y;
-    return Math.sqrt(dx * dx + dy * dy);
-  };
-
-  // How close counts as "close enough" for this station.
-  Game.prototype.reachOf = function (s) {
-    return s.type === 'parts' ? C.PARTS_REACH : C.REACH;
-  };
-
-  // Could this chef's action key buy a helper robot right now? Only with
-  // completely empty hands (no potato, no flat robot on its shoulders),
-  // enough coins, and room for another robot. HELPER_MAX of 0 means no limit.
-  Game.prototype.canBuyHelper = function (chef) {
-    if (chef.flat || chef.holding || chef.carrying) return false;
-    if (C.HELPER_MAX > 0 && this.helpers.length >= C.HELPER_MAX) return false;
-    return this.coins >= this.helperCost;
-  };
-
-  // Would this chef's action key actually do something at this station,
-  // right now? Each line here matches one of the station rules in
-  // useStation() below.
-  Game.prototype.canUse = function (chef, station) {
-    var held = chef.holding;
-    if (chef.flat || chef.carrying) return false;
-
-    // A bed: only with empty hands, to pull up a potato.
-    if (station.type === 'bed') return held === null;
-
-    // A jar: with any potato that isn't ruined.
-    if (station.type === 'jar') return held !== null && held.doneness !== 'ruined';
-
-    // An oven: put a potato in an empty one, or take one out empty-handed.
-    if (station.type === 'oven') {
-      if (station.potato) return held === null;
-      return held !== null;
-    }
-
-    // The bin: only if there's something to throw away.
-    if (station.type === 'bin') return held !== null;
-
-    // The parts table: only if a robot would really be bought.
-    if (station.type === 'parts') return this.canBuyHelper(chef);
-
-    // A customer: only if you have a potato AND someone is there to take it.
-    // An empty slot, or one whose customer is already leaving, does nothing
-    // — you keep your potato.
-    if (station.type === 'bay') {
-      var customer = this.customers[station.index];
-      return held !== null && customer !== null && customer.state !== 'leaving';
-    }
-
-    return false;
-  };
-
-  // Work out what this chef's action key would do right now, and remember it
-  // on the chef in three places:
-  //
-  //    chef.nearestFlat   the flat robot the key would lift
-  //    chef.nearestDrop   the potato on the floor the key would pick up
-  //    chef.nearest       the station the chef is next to
-  //
-  // At most ONE of these is ever set, in the order listed at the top of this
-  // section.
-  Game.prototype.findTarget = function (chef) {
-    var i, gap;
-
-    chef.nearestFlat = null;
-    chef.nearestDrop = null;
-    chef.nearest = null;
-
-    // 1. Flat or being carried: this player can't do anything.
-    if (chef.flat) return;
-
-    // 2. Carrying a flat robot: the key puts it down, whatever else is near.
-    if (chef.carrying) return;
-
-    if (!chef.holding) {
-      // 3. A flat robot underfoot — a helper, or the other chef. This beats
-      //    any station, because a robot can collapse right on top of one.
-      var flatGap = C.HELPER_PICKUP_REACH;
-      var flatOnes = this.helpers.concat(this.chefs);
-      for (i = 0; i < flatOnes.length; i++) {
-        var fr = flatOnes[i];
-        if (fr === chef || !isFlat(fr) || fr.carried) continue;
-        gap = Math.sqrt((fr.x - chef.x) * (fr.x - chef.x) + (fr.y - chef.y) * (fr.y - chef.y));
-        if (gap < flatGap) { flatGap = gap; chef.nearestFlat = fr; }
-      }
-      if (chef.nearestFlat) return;
-
-      // 4. A potato lying on the floor. This beats any station too — so a
-      //    potato can always be picked up again, even one that a robot
-      //    dropped right next to a bed or the bin when it collapsed.
-      var dropGap = C.DROP_REACH;
-      for (i = 0; i < this.dropped.length; i++) {
-        var item = this.dropped[i];
-        gap = Math.sqrt((item.x - chef.x) * (item.x - chef.x) + (item.y - chef.y) * (item.y - chef.y));
-        if (gap < dropGap) { dropGap = gap; chef.nearestDrop = item; }
-      }
-      if (chef.nearestDrop) return;
-    }
-
-    // 5. The closest station in reach. The parts table only counts when the
-    //    key would really buy a robot. Otherwise it steps aside, and whatever
-    //    else is nearby — or the open floor — gets the press instead.
-    var closestGap = Infinity;
-    for (i = 0; i < this.stations.length; i++) {
-      var s = this.stations[i];
-      if (s.type === 'parts' && !this.canBuyHelper(chef)) continue;
-      gap = this.gapTo(chef, s);
-      if (gap < this.reachOf(s) && gap < closestGap) {
-        closestGap = gap;
-        chef.nearest = s;
-      }
-    }
-  };
-
-
-  // ==========================================================================
-  //  PRESSING THE ACTION KEY — the one verb in the game
-  // ==========================================================================
-  //
-  //  What happens depends entirely on what findTarget() above picked out for
-  //  this chef.
-
-  Game.prototype.useStation = function (chef) {
-    // A flat chef, or one being carried, can't do anything.
-    if (chef.flat) return;
-
-    // Work the answer out fresh, so the key does exactly what is glowing.
-    this.findTarget(chef);
-
-    var station = chef.nearest;
-    var held = chef.holding;
-
-    // --- CARRYING A COLLAPSED ROBOT: put it down ----------------------------
-    // This beats everything, so you can never get stuck holding one.
-    if (chef.carrying) {
-      chef.carrying.carried = false;
-      chef.carrying.x = chef.x;
-      chef.carrying.y = chef.y;
-      chef.carrying = null;
-      return;
-    }
-
-    // --- A COLLAPSED ROBOT UNDERFOOT: pick it up ----------------------------
-    // A flat helper, or the other chef when its battery has run out.
-    if (chef.nearestFlat) {
-      chef.nearestFlat.carried = true;
-      chef.carrying = chef.nearestFlat;
-      chef.nearestFlat = null;
-      return;
-    }
-
-    // --- A POTATO ON THE FLOOR: pick it back up -----------------------------
-    // With empty hands this beats every station, so a potato on the floor can
-    // always be picked up again, wherever it is lying.
-    if (chef.nearestDrop) {
-      chef.holding = chef.nearestDrop.potato;
-      var at = this.dropped.indexOf(chef.nearestDrop);
-      if (at !== -1) this.dropped.splice(at, 1);
-      chef.nearestDrop = null;
-      sfx('pickup');
-      return;
-    }
-
-    // --- OPEN FLOOR: put it down --------------------------------------------
-    // No station is in reach, so the key puts down whatever you're holding.
-    // Dropping only ever happens out in the open like this — never next to a
-    // station, where the key means using the station instead.
-    if (!station) {
-      if (held) {
-        this.dropped.push({ potato: held, x: chef.x, y: chef.y });
-        chef.holding = null;
-        this.puff(chef.x, chef.y - 6, C.SOIL_PUFF, 4);
-        sfx('drop');
-      } else if (this.gapTo(chef, this.partsTable) < C.PARTS_REACH &&
-                 (C.HELPER_MAX === 0 || this.helpers.length < C.HELPER_MAX)) {
-        // Empty hands at the parts table, but not enough coins. Nothing is
-        // bought, so nothing glows — but say why, rather than doing nothing
-        // silently.
-        var t = this.partsTable;
-        this.showPopup(t.x + t.w / 2, t.y - 4, this.helperCost + '!', C.BATTERY_LOW_COLOUR);
-        sfx('nope');
-      }
-      return;
-    }
-
-    // --- NEXT TO A STATION, BUT NOTHING TO DO THERE -------------------------
-    // For example an empty slot in the hatch: nothing happens, and you keep
-    // your potato. canUse() is the same check that decides the glow.
-    if (!this.canUse(chef, station)) return;
-
-    // --- A GARDEN BED: pull up a raw potato ---------------------------------
-    if (station.type === 'bed') {
-      chef.holding = { size: station.size, colour: 'natural', doneness: 'raw' };
-      this.puff(chef.x, chef.y - 24, C.SOIL_PUFF, 6);
-      sfx('dig');
-      return;
-    }
-
-    // --- A PAINT JAR: dunk whatever we're holding ---------------------------
-    // Re-dunking is allowed and simply overwrites the colour, so a wrong dunk
-    // costs a walk rather than the whole potato.
-    if (station.type === 'jar') {
-      held.colour = station.colour;
-      // Splash from the middle of the jar's opening, whatever size it is.
-      this.puff(station.x + station.w / 2, station.y + station.h / 4,
-                C.PAINT_SPLASH[station.colour], 8);
-      sfx('dunk');
-      return;
-    }
-
-    // --- AN OVEN: put one in, or take one out -------------------------------
-    if (station.type === 'oven') {
-      if (!station.potato && held) {
-        station.potato = held;
-        station.timeIn = this.timerForDoneness(held.doneness);
-        station.lastDoneness = this.donenessAt(station.timeIn);
-        chef.holding = null;
-        sfx('ovenIn');
-      } else if (station.potato && !held) {
-        station.potato.doneness = this.donenessAt(station.timeIn);
-        // If a helper had abandoned this one, it's yours now — so no helper
-        // will come and take it off you.
-        station.potato.orphaned = false;
-        chef.holding = station.potato;
-        station.potato = null;
-        sfx('ovenOut');
-      }
-      return;
-    }
-
-    // --- THE BIN: throw it away ---------------------------------------------
-    if (station.type === 'bin') {
-      chef.holding = null;
-      this.puff(station.x + 30, station.y + 14, C.BIN_PUFF, 8);
-      sfx('bin');
-      return;
-    }
-
-    // --- THE PARTS TABLE: build a helper robot -------------------------------
-    // canUse() has already checked your hands are empty and you can afford it.
-    if (station.type === 'parts') {
-      this.coins -= this.helperCost;
-      this.spawnHelper();
-      this.helperCost = Math.round(this.helperCost * C.HELPER_COST_MULTIPLIER);
-      return;
-    }
-
-    // --- A CUSTOMER: hand it over and find out ------------------------------
-    // canUse() has already checked there's a customer here who isn't leaving.
-    if (station.type === 'bay') {
-      chef.holding = null;
-      this.serveCustomer(station.index, held, station.drawX + C.BAY_WIDTH / 2);
-    }
-  };
-
-
-  // Hand a potato to a customer and settle up. Used by the player AND by the
-  // helper robots, so that both are paid by exactly the same rules.
-  Game.prototype.serveCustomer = function (bayIndex, potato, popupX) {
-    var customer = this.customers[bayIndex];
-    if (!customer || customer.state === 'leaving') return false;
-
-    var wanted = customer.order;
-    var correct = wanted.size === potato.size &&
-                  wanted.colour === potato.colour &&
-                  wanted.doneness === potato.doneness;
-
-    if (correct) {
-      // The faster it arrived, the more it pays.
-      var speedShare = customer.patience / customer.patienceMax;
-      var pay = C.PAY_BASE + Math.round(C.PAY_SPEED_BONUS * speedShare);
-      this.coins += pay;
-      this.showPopup(popupX, 70, '+' + pay, '#f2c230');
-      // Full volume even when a helper did it — this is the payoff you bought
-      // them for, so it should sound just as good.
-      sfx('serveGood');
-      sfx('coins');
-      this.customerLeaves(bayIndex, 'happy');
-    } else {
-      sfx('serveBad');
-      this.customerLeaves(bayIndex, 'angry');
-    }
-    return true;
-  };
-
-
-  // ==========================================================================
-  //  THE GAME LOOP — runs about 60 times a second
-  // ==========================================================================
-  //
-  //  'seconds' is how long has passed since the last frame. Everything that
-  //  moves is multiplied by it, so the game runs at the same speed on a fast
-  //  machine and a slow one.
-
-  // Is any of this list of keys being held down right now?
-  Game.prototype.anyHeld = function (codes) {
-    for (var i = 0; i < codes.length; i++) {
-      if (this.keysHeld[codes[i]]) return true;
-    }
-    return false;
-  };
-
-  // One chef's turn: walk it with its own keys, then charge or drain its own
-  // battery. A flat chef does nothing at all until it's carried to the pad.
-  Game.prototype.updateChef = function (chef, seconds) {
-    if (chef.flat) {
-      // Being carried: ride along on the other chef's shoulders.
-      chef.charging = false;
-      return;
-    }
-
-    // --- Walking ------------------------------------------------------------
-    var dx = 0, dy = 0;
-    if (this.anyHeld(chef.keys.left)) dx--;
-    if (this.anyHeld(chef.keys.right)) dx++;
-    if (this.anyHeld(chef.keys.up)) dy--;
-    if (this.anyHeld(chef.keys.down)) dy++;
-
-    var speed = this.currentSpeed(chef);
-    if (dx || dy) {
-      // Divide by the diagonal length so walking diagonally isn't faster.
-      var length = Math.sqrt(dx * dx + dy * dy);
-      chef.x += (dx / length) * speed * seconds;
-      chef.y += (dy / length) * speed * seconds;
-      // A flat battery shuffles instead of striding.
-      chef.walkPhase += seconds * 14 * (speed / C.CHEF_SPEED);
-    } else {
-      chef.walkPhase = 0;
-    }
-
-    // Keep its feet inside the walkable box. The two chefs don't bump into
-    // each other — they can walk straight through one another.
-    chef.x = Math.max(C.WALK_LEFT, Math.min(C.WALK_RIGHT, chef.x));
-    chef.y = Math.max(C.WALK_TOP, Math.min(C.WALK_BOTTOM, chef.y));
-
-    // --- The battery --------------------------------------------------------
-    // Standing on the pad fills it quickly. Everything else drains it slowly.
-    chef.charging = this.onCharger(chef);
-
-    // A robot you're carrying — a helper or the other chef — rides along on
-    // your shoulders, and wakes up the moment you step onto the pad.
-    if (chef.carrying) {
-      chef.carrying.x = chef.x;
-      chef.carrying.y = chef.y;
-      if (chef.charging) {
-        this.revive(chef.carrying);
-        chef.carrying = null;
-      }
-    }
-
-    if (chef.charging) {
-      chef.battery = Math.min(100, chef.battery + C.BATTERY_RECHARGE_RATE * seconds);
-
-      // Sparks, so it is obvious something is happening.
-      if (Math.random() < seconds * 20) {
-        var pad = this.charger;
-        this.puffs.push({
-          x: pad.x + pad.w / 2 + (Math.random() - 0.5) * pad.w,
-          y: pad.y + pad.h - 10,
-          vx: (Math.random() - 0.5) * 70,
-          vy: -50 - Math.random() * 50,
-          life: 0.4, lifeMax: 0.4,
-          radius: 1.5 + Math.random() * 2,
-          colour: C.CHARGE_SPARK
-        });
-      }
-
-      // A shimmer that climbs in pitch as the battery fills.
-      chef.chargeBeep -= seconds;
-      if (chef.chargeBeep <= 0) {
-        chef.chargeBeep = 0.09;
-        sfx('charge', { pitch: chef.battery / 100 });
-      }
-    } else {
-      chef.battery -= (100 / C.BATTERY_LASTS) * seconds;
-      if (chef.battery <= 0) {
-        this.chefCollapse(chef);
-        return;
-      }
-
-      // Nag once a second while the battery is nearly flat. You are usually
-      // looking somewhere else entirely when this matters.
-      if (chef.battery <= C.BATTERY_LOW_AT) {
-        chef.lowBeep -= seconds;
-        if (chef.lowBeep <= 0) {
-          chef.lowBeep = 1;
-          sfx('batteryLow');
-        }
-      } else {
-        chef.lowBeep = 0;
-      }
-    }
-  };
-
-  Game.prototype.update = function (seconds) {
-    // Dust and steam keep drifting even when paused — it looks better.
-    var i;
-    for (i = 0; i < this.puffs.length; i++) {
-      var p = this.puffs[i];
-      p.x += p.vx * seconds;
-      p.y += p.vy * seconds;
-      p.life -= seconds;
-    }
-    this.puffs = this.puffs.filter(function (p) { return p.life > 0; });
-
-    for (i = 0; i < this.popups.length; i++) {
-      this.popups[i].y -= 28 * seconds;
-      this.popups[i].life -= seconds;
-    }
-    this.popups = this.popups.filter(function (p) { return p.life > 0; });
-
-    if (this.mode !== 'play') return;
-
-    this.elapsed += seconds;
-
-    // --- The two chefs: walking and batteries --------------------------------
-    for (i = 0; i < this.chefs.length; i++) {
-      this.updateChef(this.chefs[i], seconds);
-    }
-    // Both chefs flat at once ends the round there and then.
-    if (this.mode !== 'play') return;
-
-    // --- Ovens cooking ------------------------------------------------------
-    for (i = 0; i < this.ovens.length; i++) {
-      var oven = this.ovens[i];
-      if (!oven.potato) continue;
-      oven.timeIn += seconds;
-
-      // Steam while cooking, smoke once it's past that.
-      var state = this.donenessAt(oven.timeIn);
-
-      // The most useful sound in the game. A potato changing stage makes a
-      // noise, so you can cook by ear from the far side of the kitchen
-      // instead of having to watch the oven.
-      if (state !== oven.lastDoneness) {
-        if (state === 'cooked') sfx('ovenReady');
-        else if (state === 'burnt') sfx('ovenBurnt');
-        else if (state === 'ruined') sfx('ovenRuined');
-        oven.lastDoneness = state;
-      }
-
-      var rate = state === 'raw' ? 0 : state === 'cooked' ? 5 : 9;
-      if (Math.random() < seconds * rate) {
-        this.puffs.push({
-          x: oven.x + 40 + Math.random() * 32,
-          y: oven.y + 4,
-          vx: (Math.random() - 0.5) * 10,
-          vy: -25 - Math.random() * 20,
-          life: 1.2, lifeMax: 1.2,
-          radius: 3 + Math.random() * 3,
-          colour: state === 'cooked' ? 'rgba(255,255,255,0.8)'
-                : state === 'burnt' ? 'rgba(60,55,52,0.7)'
-                : 'rgba(30,28,26,0.85)'
-        });
-      }
-    }
-
-    // --- Customers waiting --------------------------------------------------
-    for (i = 0; i < this.customers.length; i++) {
-      var customer = this.customers[i];
-      if (!customer) continue;
-      customer.stateTime += seconds;
-
-      if (customer.state === 'arriving' && customer.stateTime > 0.4) {
-        customer.state = 'waiting';
-      }
-
-      if (customer.state !== 'leaving') {
-        customer.patience -= seconds;
-        if (customer.patience <= 0 && this.mode === 'play') {
-          this.customerLeaves(i, 'angry');
-        }
-      } else if (customer.stateTime > 0.7) {
-        this.customers[i] = null;
-      }
-    }
-
-    // --- New customers arriving ---------------------------------------------
-    this.untilNextCustomer -= seconds;
-    if (this.untilNextCustomer <= 0) {
-      if (this.spawnCustomer()) {
-        var speedUp = Math.max(C.SPAWN_FASTEST, 1 - this.elapsed / C.SPAWN_RAMP_SECONDS);
-        this.untilNextCustomer = C.SPAWN_EVERY * speedUp;
-      } else {
-        this.untilNextCustomer = 1;   // hatch is full — try again in a second
-      }
-    }
-
-    // --- The helper robots get their turn -----------------------------------
-    for (i = 0; i < this.helpers.length; i++) {
-      this.helperThink(this.helpers[i], seconds);
-    }
-
-    // --- What would each player's action key do right now? ------------------
-    // Worked out every frame so the right thing glows. See findTarget above.
-    for (i = 0; i < this.chefs.length; i++) {
-      this.findTarget(this.chefs[i]);
-    }
-  };
-
-
-  // ==========================================================================
-  //  DRAWING
-  // ==========================================================================
-
-  // Draw a picture. If it's missing, draw a labelled orange box instead so
-  // you can see at a glance which file didn't turn up.
-  Game.prototype.picture = function (name, x, y, w, h) {
-    var img = images[name];
-    var ctx = this.ctx;
-
-    if (img && img.complete && !img.failed && img.naturalWidth) {
-      ctx.drawImage(img, x, y, w, h);
-      return;
-    }
-
-    ctx.fillStyle = 'rgba(224,131,58,0.25)';
-    ctx.fillRect(x, y, w, h);
-    ctx.strokeStyle = '#e0833a';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
-    ctx.fillStyle = C.INK;
-    ctx.font = '8px monospace';
-    ctx.fillText(name, x + 2, y + 10, w - 4);
-  };
-
-  // Draw a potato: the base picture, then the cooked or burnt marks on top.
-  Game.prototype.drawPotato = function (potato, centreX, centreY, scale) {
-    var size = 64 * scale;
-
-    if (potato.doneness === 'ruined') {
-      this.picture('potato_ruined', centreX - size / 2, centreY - size / 2, size, size);
-      return;
-    }
-
-    this.picture('potato_' + potato.size + '_' + potato.colour,
-                 centreX - size / 2, centreY - size / 2, size, size);
-
-    if (potato.doneness === 'cooked' || potato.doneness === 'burnt') {
-      var overlay = size * C.OVERLAY_SCALE[potato.size];
-      this.picture('overlay_' + potato.doneness,
-                   centreX - overlay / 2, centreY - overlay / 2, overlay, overlay);
-    }
-  };
-
-  // A yellow battery bar — over a chef's or helper's head, or up in the top
-  // corner. It turns red and flashes once the battery is nearly flat, which
-  // is the only warning you get before that robot collapses.
-  // 'barWidth' is optional — left out, it's the size drawn over a chef.
-  Game.prototype.drawBatteryBar = function (centreX, y, charge, barWidth) {
-    var ctx = this.ctx;
-    var width = barWidth || 34, height = 5;
-    var left = centreX - width / 2;
-    var filled = Math.max(0, Math.min(1, charge / 100));
-    var low = charge <= C.BATTERY_LOW_AT;
-
-    // Flash when it's nearly flat.
-    ctx.globalAlpha = low ? 0.55 + 0.45 * Math.sin(performance.now() / 110) : 1;
-
-    // The empty trough behind the bar.
-    ctx.fillStyle = 'rgba(42,35,32,0.6)';
-    ctx.fillRect(left - 1, y - 1, width + 2, height + 2);
-
-    // The charge itself.
-    ctx.fillStyle = low ? C.BATTERY_LOW_COLOUR : C.BATTERY_FULL_COLOUR;
-    ctx.fillRect(left, y, width * filled, height);
-
-    ctx.globalAlpha = 1;
-  };
-
-
-  // A soft oval shadow, so things look like they're sitting on the floor.
-  Game.prototype.shadow = function (centreX, centreY, radiusX, radiusY) {
-    var ctx = this.ctx;
-    ctx.fillStyle = 'rgba(40,30,20,0.16)';
-    ctx.beginPath();
-    ctx.ellipse(centreX, centreY, radiusX, radiusY, 0, 0, Math.PI * 2);
-    ctx.fill();
-  };
-
-
-  Game.prototype.draw = function () {
-    var ctx = this.ctx;
-    var self = this;
-    var i;
-
-    // Everything below is written in 500x500 coordinates; this line scales it
-    // up to the real canvas so it stays sharp.
-    ctx.setTransform(C.SHARPNESS, 0, 0, C.SHARPNESS, 0, 0);
-    ctx.clearRect(0, 0, C.WIDTH, C.HEIGHT);
-
-    this.picture('kitchen_background', 0, 0, C.WIDTH, C.HEIGHT);
-
-    // --- Customers in the hatch ---------------------------------------------
-    // Clipped to the hatch opening so they slide in and out of a hole.
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(C.HATCH_X, C.HATCH_Y, C.HATCH_WIDTH, C.HATCH_HEIGHT);
-    ctx.clip();
-
-    for (i = 0; i < this.customers.length; i++) {
-      var cu = this.customers[i];
-      if (!cu) continue;
-
-      var bayX = this.bays[i].drawX;
-      var ease = function (t) { return 1 - Math.pow(1 - Math.min(1, t), 3); };
-
-      var slide = 0;
-      if (cu.state === 'arriving') slide = (1 - ease(cu.stateTime / 0.4)) * 86;
-      else if (cu.state === 'leaving') slide = ease(cu.stateTime / 0.7) * 86;
-
-      // Fidget when patience is low, storm off when angry.
-      var jitter = 0;
-      if (cu.state === 'waiting' && cu.patience / cu.patienceMax < 0.3) {
-        jitter = Math.sin(performance.now() / 40) * 1.5;
-      }
-      if (cu.state === 'leaving' && cu.mood === 'angry') {
-        jitter = Math.sin(cu.stateTime * 60) * 3;
-      }
-
-      // Sized to fit the bay, keeping the artwork's own proportions so the
-      // robots never look squashed however many customers we allow at once.
-      var cw = C.BAY_WIDTH - 6;
-      var chh = cw * (86 / 132);
-      var cy = C.HATCH_Y + C.HATCH_HEIGHT - chh;
-      this.picture('customer_' + cu.face, bayX + 3 + jitter, cy + slide, cw, chh);
-
-      if (cu.state === 'leaving' && cu.mood === 'angry') {
-        ctx.fillStyle = 'rgba(224,72,60,0.35)';
-        ctx.fillRect(bayX, C.HATCH_Y, C.BAY_WIDTH, C.HATCH_HEIGHT);
-      }
-    }
-    ctx.restore();
-
-    // --- The kitchen itself -------------------------------------------------
-    // Everything is collected into a list first and sorted by how far down the
-    // screen it is, so things nearer the bottom are drawn last and overlap
-    // properly. Without this the chef would appear behind the ovens.
-    var toDraw = [];
-
-    this.beds.forEach(function (bed) {
-      toDraw.push([bed.y + bed.h, function () {
-        self.shadow(bed.x + bed.w / 2, bed.y + bed.h - 4, bed.w * 0.46, 6);
-        self.picture(bed.picture, bed.x, bed.y, bed.w, bed.h);
-      }]);
-    });
-
-    this.jars.forEach(function (jar) {
-      toDraw.push([jar.y + jar.h, function () {
-        self.shadow(jar.x + jar.w / 2, jar.y + jar.h - 3, jar.w * 0.42, 5);
-        self.picture(jar.picture, jar.x, jar.y, jar.w, jar.h);
-      }]);
-    });
-
-    toDraw.push([this.bin.y + this.bin.h, function () {
-      var b = self.bin;
-      self.shadow(b.x + 30, b.y + b.h - 3, 22, 5);
-      self.picture('bin', b.x, b.y, b.w, b.h);
-    }]);
-
-    this.ovens.forEach(function (oven) {
-      toDraw.push([oven.y + oven.h, function () { self.drawOven(oven); }]);
-    });
-
-    // Potatoes lying on the floor. Sorted in with everything else so the chef
-    // walks in front of the ones below him and behind the ones above.
-    this.dropped.forEach(function (item) {
-      toDraw.push([item.y, function () {
-        self.shadow(item.x, item.y, 13, 4);
-        self.drawPotato(item.potato, item.x, item.y - 11, C.POTATO_ON_FLOOR);
-      }]);
-    });
-
-    // The parts table, with the price of the next robot floating over it.
-    toDraw.push([this.partsTable.y + this.partsTable.h, function () {
-      var t = self.partsTable;
-      self.shadow(t.x + t.w / 2, t.y + t.h - 3, t.w * 0.44, 6);
-      self.picture('parts_table', t.x, t.y, t.w, t.h);
-
-      if (C.HELPER_MAX === 0 || self.helpers.length < C.HELPER_MAX) {
-        var affordable = self.coins >= self.helperCost;
-        ctx.textAlign = 'center';
-        ctx.font = '12px ' + C.FONT;
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = C.INK;
-        ctx.strokeText(self.helperCost, t.x + t.w / 2, t.y - 4);
-        ctx.fillStyle = affordable ? C.BATTERY_FULL_COLOUR : C.BATTERY_LOW_COLOUR;
-        ctx.fillText(self.helperCost, t.x + t.w / 2, t.y - 4);
-        ctx.textAlign = 'left';
-      }
-    }]);
-
-    // The helper robots, each sorted into the scene by how far down it is.
-    this.helpers.forEach(function (h) {
-      // A robot being carried is drawn with the chef, not here.
-      if (h.carried) return;
-
-      toDraw.push([h.y, function () {
-        var w = C.CHEF_WIDTH * C.HELPER_SCALE;
-        var ht = C.CHEF_HEIGHT * C.HELPER_SCALE;
-
-        // A coloured ring on the floor, so you can tell them apart from you.
-        ctx.strokeStyle = h.tint;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.ellipse(h.x, h.y - 1, 15, 5, 0, 0, Math.PI * 2);
-        ctx.stroke();
-
-        // --- Collapsed: lying on its side until someone carries it off ------
-        if (h.state === 'flat') {
-          ctx.save();
-          ctx.translate(h.x, h.y - 10);
-          ctx.rotate(Math.PI / 2);
-          ctx.globalAlpha = 0.75;
-          self.picture('chef_robot', -w / 2, -ht / 2, w, ht);
-          ctx.restore();
-          ctx.globalAlpha = 1;
-
-          // A flashing red cross so it's obvious it needs collecting.
-          ctx.globalAlpha = 0.5 + 0.5 * Math.sin(performance.now() / 160);
-          ctx.fillStyle = C.BATTERY_LOW_COLOUR;
-          ctx.font = '13px ' + C.FONT;
-          ctx.textAlign = 'center';
-          ctx.fillText('!', h.x, h.y - 26);
-          ctx.textAlign = 'left';
-          ctx.globalAlpha = 1;
-          return;
-        }
-
-        var bob = h.walkPhase ? -Math.abs(Math.sin(h.walkPhase)) * 2.5 : 0;
-        self.picture('chef_robot', h.x - w / 2, h.y - ht + bob, w, ht);
-        if (h.holding) {
-          self.drawPotato(h.holding, h.x, h.y - 21 + bob, C.POTATO_IN_HANDS * C.HELPER_SCALE);
-        }
-        self.drawBatteryBar(h.x, h.y - ht - 7 + bob, h.battery, 26);
-      }]);
-    });
-
-    // The charging pad. It glows while either chef is topping up.
-    toDraw.push([this.charger.y + this.charger.h, function () {
-      var pad = self.charger;
-      self.shadow(pad.x + pad.w / 2, pad.y + pad.h - 5, pad.w * 0.5, 7);
-
-      var anyCharging = self.chefs.some(function (c) { return c.charging; });
-      if (anyCharging) {
-        var halo = 0.25 + 0.2 * Math.sin(performance.now() / 90);
-        ctx.fillStyle = 'rgba(255,230,120,' + halo + ')';
-        ctx.beginPath();
-        ctx.ellipse(pad.x + pad.w / 2, pad.y + pad.h - 6, pad.w * 0.7, 14, 0, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      self.picture('charging_station', pad.x, pad.y, pad.w, pad.h);
-    }]);
-
-    // The two chefs, each sorted into the scene by how far down it is.
-    this.chefs.forEach(function (chef) {
-      // A chef being carried is drawn on the other chef's shoulders instead.
-      if (chef.carried) return;
-      toDraw.push([chef.y, function () { self.drawChef(chef); }]);
-    });
-
-    toDraw.sort(function (a, b) { return a[0] - b[0]; });
-    for (i = 0; i < toDraw.length; i++) toDraw[i][1]();
-
-    // --- Each player's glow, in that player's colour -------------------------
-    // Player 2's rings are drawn slightly smaller, so if both players are
-    // aiming at the same thing you can see both rings at once.
-    if (this.mode === 'play') {
-      for (i = 0; i < this.chefs.length; i++) this.drawGlow(this.chefs[i], i * 4);
-    }
-
-    // --- Speech bubbles, with the order and the patience bar -----------------
-    for (i = 0; i < this.customers.length; i++) {
-      var c2 = this.customers[i];
-      if (!c2 || c2.state === 'leaving') continue;
-
-      var bx = this.bays[i].drawX;
-      ctx.globalAlpha = c2.state === 'arriving' ? Math.min(1, c2.stateTime / 0.4) : 1;
-
-      // The bubble fills its bay, whatever size the bays are.
-      var bw = C.BAY_WIDTH - 6;              // bubble width
-      var bh = bw * (58 / 80);               // keep the artwork's proportions
-      var bLeft = bx + 3;
-      var midX = bLeft + bw / 2;
-
-      this.picture('speech_bubble', bLeft, 96, bw, bh);
-      this.drawPotato(c2.order, midX, 96 + bh * 0.47,
-                      C.POTATO_IN_BUBBLE * (C.BAY_WIDTH / 140));
-
-      // The patience bar sits just under the bubble.
-      var barW = bw * 0.62, barX = midX - barW / 2, barY = 96 + bh - 4;
-      var left = Math.max(0, c2.patience / c2.patienceMax);
-      ctx.fillStyle = '#d9d2c2';
-      ctx.fillRect(barX, barY, barW, 5);
-      ctx.fillStyle = left > 0.5 ? '#3aa845' : left > 0.25 ? '#f2c230' : '#e0483c';
-      ctx.fillRect(barX, barY, barW * left, 5);
-      ctx.strokeStyle = C.INK;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(barX, barY, barW, 5);
-
-      ctx.globalAlpha = 1;
-    }
-
-    // --- Dust, steam and smoke ----------------------------------------------
-    for (i = 0; i < this.puffs.length; i++) {
-      var puff = this.puffs[i];
-      ctx.globalAlpha = Math.max(0, puff.life / puff.lifeMax);
-      ctx.fillStyle = puff.colour;
-      ctx.beginPath();
-      ctx.arc(puff.x, puff.y, puff.radius, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-
-    // --- Floating score numbers ---------------------------------------------
-    ctx.textAlign = 'center';
-    for (i = 0; i < this.popups.length; i++) {
-      var pop = this.popups[i];
-      ctx.globalAlpha = Math.min(1, pop.life * 2);
-      ctx.font = '18px ' + C.FONT;
-      ctx.lineWidth = 4;
-      ctx.strokeStyle = C.INK;
-      ctx.strokeText(pop.text, pop.x, pop.y);
-      ctx.fillStyle = pop.colour;
-      ctx.fillText(pop.text, pop.x, pop.y);
-    }
-    ctx.globalAlpha = 1;
-
-    // --- Coins and lives ----------------------------------------------------
-    this.picture('icon_coin', 6, 2, 14, 14);
-    ctx.textAlign = 'left';
-    ctx.font = '13px ' + C.FONT;
-    ctx.fillStyle = C.INK;
-    ctx.fillText(this.coins, 24, 14);
-
-    // The hearts, in a row across the middle of the top. They shrink to fit
-    // however many lives config.js asks for, so ten works as well as three,
-    // and the whole row stays centred whatever that number is.
-    var heartSize = C.STRIKES_ALLOWED > 6 ? 11 : 14;
-    var heartGap = heartSize + 2;
-    var heartsLeft = (C.WIDTH - C.STRIKES_ALLOWED * heartGap + 2) / 2;
-    for (i = 0; i < C.STRIKES_ALLOWED; i++) {
-      ctx.globalAlpha = i < C.STRIKES_ALLOWED - this.strikes ? 1 : 0.22;
-      this.picture('icon_heart', heartsLeft + i * heartGap, 2,
-                   heartSize, heartSize);
-    }
-    ctx.globalAlpha = 1;
-
-    // --- Both players' batteries, in the top right --------------------------
-    // Each labelled P1 or P2 in that player's colour. Player 2's sits on the
-    // far right, player 1's just to its left.
-    var hudBarWidth = 48;
-    for (i = 0; i < this.chefs.length; i++) {
-      var hc = this.chefs[i];
-      var barRight = C.WIDTH - 8 - (this.chefs.length - 1 - i) * 78;
-      var barLeft = barRight - hudBarWidth;
-      ctx.font = '10px ' + C.FONT;
-      ctx.textAlign = 'right';
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = C.INK;
-      ctx.strokeText(hc.label, barLeft - 5, 13);
-      ctx.fillStyle = hc.colour;
-      ctx.fillText(hc.label, barLeft - 5, 13);
-      ctx.textAlign = 'left';
-      this.drawBatteryBar(barLeft + hudBarWidth / 2, 6, hc.battery, hudBarWidth);
-    }
-
-    // --- The debug outlines, if switched on in config.js ---------------------
-    if (C.SHOW_ZONES) {
-      ctx.setLineDash([4, 3]);
-      ctx.lineWidth = 1;
-      ctx.strokeStyle = '#2f6fd6';
-      ctx.strokeRect(C.WALK_LEFT, C.WALK_TOP,
-                     C.WALK_RIGHT - C.WALK_LEFT, C.WALK_BOTTOM - C.WALK_TOP);
-      ctx.strokeStyle = '#e0483c';
-      for (i = 0; i < this.stations.length; i++) {
-        var z = this.stations[i];
-        ctx.strokeRect(z.x, z.y, z.w, z.h);
-      }
-      // The parts table is used from one spot at its front, not from its
-      // outline, so its circle shows where your feet need to be.
-      var pt = this.partsTable;
-      ctx.beginPath();
-      ctx.arc(pt.x + pt.w / 2, pt.y + pt.h, C.PARTS_REACH, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-
-    if (this.mode !== 'play') this.drawOverlay();
-  };
-
-
-  // A chef's number (1 or 2), in its player's colour with a dark outline.
-  Game.prototype.drawChefLabel = function (chef, x, y) {
-    var ctx = this.ctx;
-    ctx.font = '11px ' + C.FONT;
-    ctx.textAlign = 'center';
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = C.INK;
-    ctx.strokeText(chef.number, x, y);
-    ctx.fillStyle = chef.colour;
-    ctx.fillText(chef.number, x, y);
-    ctx.textAlign = 'left';
-  };
-
-  // A flat robot slung over a chef's shoulders — a helper, or the other chef.
-  Game.prototype.drawCarried = function (robot, x, y) {
-    var ctx = this.ctx;
-    var scale = robot.isChef ? 0.8 : C.HELPER_SCALE * 0.8;
-    var cw = C.CHEF_WIDTH * scale;
-    var cht = C.CHEF_HEIGHT * scale;
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(Math.PI / 2);
-    this.picture('chef_robot', -cw / 2, -cht / 2, cw, cht);
-    ctx.restore();
-    // A carried chef keeps its number, so everyone can see who's who.
-    if (robot.isChef) this.drawChefLabel(robot, x + cht / 2 + 6, y + 4);
-  };
-
-  // One chef: the ring on the floor in its player's colour, the robot
-  // itself, whatever it is holding or carrying, its battery, and its number.
-  Game.prototype.drawChef = function (chef) {
-    var ctx = this.ctx;
-
-    this.shadow(chef.x, chef.y - 1, 18, 5);
-
-    // The ring on the floor, so you can tell the two players apart.
-    ctx.strokeStyle = chef.colour;
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.ellipse(chef.x, chef.y - 1, 19, 6, 0, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // --- Collapsed: lying on its side until the other chef carries it off ---
-    if (chef.flat) {
-      ctx.save();
-      ctx.translate(chef.x, chef.y - 14);
-      ctx.rotate(Math.PI / 2);
-      ctx.globalAlpha = 0.75;
-      this.picture('chef_robot', -C.CHEF_WIDTH / 2, -C.CHEF_HEIGHT / 2,
-                   C.CHEF_WIDTH, C.CHEF_HEIGHT);
-      ctx.restore();
-      ctx.globalAlpha = 1;
-      this.drawChefLabel(chef, chef.x - 12, chef.y - 40);
-
-      // A flashing red mark so it's obvious it needs collecting.
-      ctx.globalAlpha = 0.5 + 0.5 * Math.sin(performance.now() / 160);
-      ctx.fillStyle = C.BATTERY_LOW_COLOUR;
-      ctx.font = '13px ' + C.FONT;
-      ctx.textAlign = 'center';
-      ctx.fillText('!', chef.x + 4, chef.y - 40);
-      ctx.textAlign = 'left';
-      ctx.globalAlpha = 1;
-      return;
-    }
-
-    var bob = chef.walkPhase ? -Math.abs(Math.sin(chef.walkPhase)) * 2.5 : 0;
-    this.picture('chef_robot',
-                 chef.x - C.CHEF_WIDTH / 2, chef.y - C.CHEF_HEIGHT + bob,
-                 C.CHEF_WIDTH, C.CHEF_HEIGHT);
-    if (chef.holding) {
-      this.drawPotato(chef.holding, chef.x, chef.y - 24 + bob, C.POTATO_IN_HANDS);
-    }
-    if (chef.carrying) {
-      this.drawCarried(chef.carrying, chef.x, chef.y - C.CHEF_HEIGHT - 6 + bob);
-    }
-
-    // The battery bar over its head, with the player number just to its left.
-    var barY = chef.y - C.CHEF_HEIGHT - 9 + bob;
-    this.drawBatteryBar(chef.x, barY, chef.battery);
-    this.drawChefLabel(chef, chef.x - 25, barY + 6);
-  };
-
-  // The pulsing glow round whatever this chef's action key will use, in that
-  // player's colour. It reads the same answer as useStation(), so it only
-  // ever glows round something the key will really do.
-  // 'inset' draws the ring that many pixels smaller.
-  Game.prototype.drawGlow = function (chef, inset) {
-    var ctx = this.ctx;
-    if (chef.flat) return;
-
-    ctx.strokeStyle = chef.colour;
-    ctx.globalAlpha = 0.6 + 0.4 * Math.sin(performance.now() / 150);
-    ctx.beginPath();
-
-    if (chef.nearest && this.canUse(chef, chef.nearest)) {
-      // A station. For a customer, ring the robot up in the hatch rather
-      // than the invisible patch of floor you're standing on.
-      var s = chef.nearest;
-      var ringX = s.type === 'bay' ? s.drawX : s.x;
-      var ringW = s.type === 'bay' ? C.BAY_WIDTH : s.w;
-      var ringH = s.type === 'bay' ? C.HATCH_HEIGHT : s.h;
-      var left = ringX - 2 + inset, top = s.y - 2 + inset;
-      var width = ringW + 4 - inset * 2, height = ringH + 4 - inset * 2;
-      ctx.lineWidth = 3;
-      if (ctx.roundRect) ctx.roundRect(left, top, width, height, 10);
-      else ctx.rect(left, top, width, height);
-    } else if (chef.nearestDrop) {
-      // A potato on the floor it would pick up.
-      ctx.lineWidth = 2;
-      ctx.ellipse(chef.nearestDrop.x, chef.nearestDrop.y, 20 - inset, 8 - inset / 2, 0, 0, Math.PI * 2);
-    } else if (chef.nearestFlat) {
-      // A flat robot it would lift.
-      ctx.lineWidth = 2;
-      ctx.ellipse(chef.nearestFlat.x, chef.nearestFlat.y - 1, 24 - inset, 9 - inset / 2, 0, 0, Math.PI * 2);
-    } else {
-      ctx.globalAlpha = 1;
-      return;   // nothing to glow round
-    }
-
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-  };
-
-
-  // The oven is drawn in layers: the dark inside, then the potato, then the
-  // oven picture on top (its window is a see-through hole), then the timer bar.
-  Game.prototype.drawOven = function (oven) {
-    var ctx = this.ctx;
-
-    this.shadow(oven.x + 56, oven.y + oven.h - 3, 50, 6);
-
-    var state = oven.potato ? this.donenessAt(oven.timeIn) : null;
-
-    ctx.fillStyle = '#2a1e18';
-    ctx.fillRect(oven.x + 28, oven.y + 22, 56, 40);
-
-    if (oven.potato) {
-      var glow = 0.25 + 0.1 * Math.sin(performance.now() / 200);
-      ctx.fillStyle = 'rgba(255,140,40,' + glow + ')';
-      ctx.fillRect(oven.x + 28, oven.y + 22, 56, 40);
-      this.drawPotato({ size: oven.potato.size, colour: oven.potato.colour, doneness: state },
-                      oven.x + 56, oven.y + 44, C.POTATO_IN_OVEN);
-    }
-
-    this.picture('oven', oven.x, oven.y, oven.w, oven.h);
-
-    if (!oven.potato) return;
-
-    // The timer bar, showing which stage the potato is in.
-    var barX = oven.x + 37, barY = oven.y + 10.5, barW = 58, barH = 5;
-    var ruin = C.OVEN_RUINED_AT;
-
-    ctx.globalAlpha = 0.35;
-    var zone = function (from, to, colour) {
-      ctx.fillStyle = colour;
-      ctx.fillRect(barX + barW * from / ruin, barY, barW * (to - from) / ruin, barH);
-    };
-    zone(0, C.OVEN_COOKED_AT, '#d9d2c2');
-    zone(C.OVEN_COOKED_AT, C.OVEN_BURNT_AT, '#f2a93a');
-    zone(C.OVEN_BURNT_AT, ruin, '#8a7f78');
-    ctx.globalAlpha = 1;
-
-    var progress = Math.min(1, oven.timeIn / ruin);
-    ctx.fillStyle = state === 'raw' ? '#d9d2c2'
-                  : state === 'cooked' ? '#f2a93a'
-                  : state === 'burnt' ? '#8a7f78' : '#e0483c';
-    ctx.fillRect(barX, barY, barW * progress, barH);
-
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(barX + barW * progress - 1, barY - 1, 2, barH + 2);
-  };
-
-
-  // The title, pause and game-over screens.
-  Game.prototype.drawOverlay = function () {
-    var ctx = this.ctx;
-
-    ctx.fillStyle = 'rgba(42,35,32,0.72)';
-    ctx.fillRect(0, 0, C.WIDTH, C.HEIGHT);
-    ctx.textAlign = 'center';
-
-    var self = this;
-    // The last number given to fillText is the widest a line may be. A line
-    // longer than that is squeezed to fit rather than running off the edge.
-    var line = function (text, y, size, colour) {
-      ctx.font = size + 'px ' + C.FONT;
-      ctx.fillStyle = colour || '#fbf7ee';
-      ctx.fillText(text, C.WIDTH / 2, y, C.WIDTH - 40);
-    };
-
-    if (this.mode === 'title') {
-      line(C.TITLE, 196, 52, '#f2c230');
-      line(C.TITLE_HINT, 234, 20);
-      line(C.TITLE_CONTROLS_P1, 266, 14, '#d9d2c2');
-      line(C.TITLE_CONTROLS_P2, 286, 14, '#d9d2c2');
-      line(C.TITLE_CONTROLS_NOTE, 302, 11, '#9a9086');
-      line(C.TITLE_BATTERY, 328, 13, '#f2c230');
-      line(C.TITLE_HELPERS, 350, 12, '#d9d2c2');
-      line(C.TITLE_FLAT, 370, 12, '#d9d2c2');
-      line(C.TITLE_FLAT_2, 386, 12, '#d9d2c2');
-      line(C.TITLE_MUTE, 412, 12, '#9a9086');
-    }
-
-    if (this.mode === 'paused') {
-      line(C.PAUSED, 240, 36, '#f2c230');
-      line(C.PAUSED_HINT, 272, 18);
-    }
-
-    if (this.mode === 'over') {
-      // Two ways to lose, so the screen says which one it was.
-      var flatOut = this.overReason === 'battery';
-      line(flatOut ? C.GAME_OVER_FLAT : C.GAME_OVER, 196, 40, '#e0483c');
-      line(flatOut ? C.GAME_OVER_FLAT_WHY : C.GAME_OVER_WHY, 222, 15, '#d9d2c2');
-      line(this.coins + C.COINS_LABEL, 262, 32);
-      line(C.BEST_LABEL + this.bestScore, 292, 18, '#d9d2c2');
-      line(C.GAME_OVER_HINT, 334, 18, '#f2c230');
-    }
-  };
-
-
-  // ==========================================================================
-  //  STARTING EVERYTHING UP
-  // ==========================================================================
-
-  function start() {
-    var canvas = document.getElementById('game');
-    canvas.width = C.WIDTH * C.SHARPNESS;
-    canvas.height = C.HEIGHT * C.SHARPNESS;
-
-    loadImages();
-    var game = new Game(canvas);
-
-    // --- Keyboard -----------------------------------------------------------
-    // Listened for on the whole window rather than just the canvas, so the
-    // controls keep working no matter where you last clicked.
-    //
-    // Keys are read by 'e.code' — WHERE the key is on the keyboard — rather
-    // than by the letter it types, so Num Lock and Shift make no difference.
-    // The key lists themselves are in config.js under THE KEYS.
-
-    // Every key the game uses, so the browser can be told not to do its own
-    // thing with them (like scrolling the page).
-    var gameKeys = [C.RESTART_KEY, C.MUTE_KEY];
-    game.chefs.forEach(function (chef) {
-      ['up', 'down', 'left', 'right', 'action'].forEach(function (move) {
-        gameKeys = gameKeys.concat(chef.keys[move]);
-      });
-    });
-
-    // Is this key one of this chef's action keys?
-    function isActionKey(chef, code) {
-      return chef.keys.action.indexOf(code) !== -1;
-    }
-
-    window.addEventListener('keydown', function (e) {
-      var code = e.code;
-      var i;
-
-      if (gameKeys.indexOf(code) !== -1) e.preventDefault();
-
-      // Browsers refuse to make any noise until the person has touched the
-      // page. This is the first moment we are allowed to switch the sound on.
-      if (typeof SOUND !== 'undefined') SOUND.unlock();
-
-      // M mutes. This has to come BEFORE the "any key starts the game" line
-      // below, or muting from the title screen would also start the round.
-      if (code === C.MUTE_KEY) {
-        if (typeof SOUND !== 'undefined') SOUND.toggleMute();
-        return;
-      }
-
-      if (code === C.RESTART_KEY && game.mode === 'over') { game.reset(); return; }
-
-      // Any other key starts the game from the title screen, or un-pauses.
-      if (game.mode === 'title' || game.mode === 'paused') {
-        game.mode = 'play';
-        // Don't also use a station on the same press.
-        for (i = 0; i < game.chefs.length; i++) {
-          if (isActionKey(game.chefs[i], code)) return;
-        }
-      }
-
-      // Each player's action key works for that player's chef only. Holding
-      // it down doesn't repeat — one press, one action.
-      if (!e.repeat && game.mode === 'play') {
-        for (i = 0; i < game.chefs.length; i++) {
-          if (isActionKey(game.chefs[i], code)) game.useStation(game.chefs[i]);
-        }
-      }
-
-      game.keysHeld[code] = true;
-    });
-
-    window.addEventListener('keyup', function (e) {
-      game.keysHeld[e.code] = false;
-    });
-
-    // Click anywhere on the game to start or un-pause.
-    canvas.addEventListener('mousedown', function () {
-      if (typeof SOUND !== 'undefined') SOUND.unlock();
-      if (game.mode === 'title' || game.mode === 'paused') game.mode = 'play';
-    });
-
-    // Alt-tabbing away pauses, so nobody comes back to a closed kitchen.
-    window.addEventListener('blur', function () {
-      game.keysHeld = {};
-      if (game.mode === 'play') game.mode = 'paused';
-    });
-
-    // --- The loop -----------------------------------------------------------
-    var lastTime = performance.now();
-
-    function frame(now) {
-      // Capped at 0.05 so that alt-tabbing away doesn't make the next frame
-      // advance the game by several seconds all at once.
-      var seconds = Math.min(0.05, (now - lastTime) / 1000);
-      lastTime = now;
-
-      game.update(seconds);
-      game.draw();
-
-      // The background tune plays during a round and stops the rest of the
-      // time. It also speeds up as the round goes on, using the same clock
-      // that makes the customers arrive faster.
-      if (typeof SOUND !== 'undefined') SOUND.setMode(game.mode, game.elapsed);
-
-      requestAnimationFrame(frame);
-    }
-
-    requestAnimationFrame(frame);
-  }
-
-  // Wait until the page is ready, then go.
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', start);
+}
+
+// Hand the plate to the customer and get paid (or not).
+function serveCustomer(p) {
+  var c = p.customer;
+  var pay = 0;
+  var pts = 0;
+  var message = '';
+  var color = CONFIG.COLORS.MONEY;
+
+  if (p.plate === c.dishId && c.patience > 0) {
+    // Right dish, on time
+    pay = CONFIG.PAY_ON_TIME;
+    pts = CONFIG.POINTS_ON_TIME;
+    c.face = CONFIG.FACE_HAPPY;
+    message = '+$' + pay + '  +' + pts + ' ' + CONFIG.TEXT.POINTS_LABEL;
+    sfx('serve');
+  } else if (p.plate === c.dishId) {
+    // Right dish, but late
+    pay = CONFIG.PAY_LATE;
+    pts = CONFIG.POINTS_LATE;
+    c.face = CONFIG.FACE_LATE;
+    message = '+$' + pay + '  +' + pts + ' ' + CONFIG.TEXT.POINTS_LABEL + CONFIG.TEXT.LATE_SUFFIX;
+    sfx('serveLate');
   } else {
-    start();
+    // Wrong dish, or Mystery Slop
+    pay = CONFIG.PAY_WRONG;
+    pts = CONFIG.POINTS_WRONG;
+    c.face = CONFIG.FACE_ANGRY;
+    if (p.plate === CONFIG.SLOP.id) {
+      message = CONFIG.TEXT.SERVED_SLOP;
+    } else {
+      message = CONFIG.TEXT.SERVED_WRONG;
+    }
+    color = CONFIG.COLORS.WRONG;
+    sfx('wrong');
   }
 
-})();
+  p.money = p.money + pay;
+  p.points = p.points + pts;
+  p.plate = null;
+
+  c.state = 'leaving';
+  c.timer = CONFIG.CUSTOMER_LEAVE_SECONDS;
+
+  addFloatingText(p, CONFIG.HALF_WIDTH / 2, CONFIG.COUNTER.y + 36, message, color, 22);
+
+  if (p.money >= CONFIG.TARGET_MONEY) {
+    declareWinner(p);
+  }
+}
+
+
+// ============================================================================
+//  7. SABOTAGE
+// ============================================================================
+
+// A player pressed a sabotage key. The victim is always the OTHER player.
+function tryBuySabotage(buyer, sab) {
+  var victim = players[1 - buyer.index];
+  var menuY = CONFIG.SABOTEUR_STRIP.y - 12;
+
+  // Refused: can't afford it (no points are spent)
+  if (buyer.points < sab.cost) {
+    sfx('dud');
+    addFloatingText(buyer, CONFIG.HALF_WIDTH / 2, menuY, CONFIG.TEXT.NOT_ENOUGH_POINTS, CONFIG.COLORS.WRONG);
+    return;
+  }
+  // Refused: the other player is already being sabotaged (no points spent)
+  if (victim.sabotage !== null) {
+    sfx('dud');
+    addFloatingText(buyer, CONFIG.HALF_WIDTH / 2, menuY, CONFIG.TEXT.ALREADY_SABOTAGED, CONFIG.COLORS.WRONG);
+    return;
+  }
+
+  // Bought!
+  buyer.points = buyer.points - sab.cost;
+  victim.sabotage = { id: sab.id, timeLeft: sab.seconds };
+  victim.announce = { sabotageId: sab.id, byName: buyer.name, timeLeft: CONFIG.SABOTAGE_ANNOUNCE_SECONDS };
+  victim.flash = CONFIG.SABOTAGE_FLASH_SECONDS;
+  victim.shake = CONFIG.SABOTAGE_SHAKE_SECONDS;
+  victim.pendingSound = { name: sab.sound, timeLeft: CONFIG.SABOTAGE_EFFECT_SOUND_DELAY };
+
+  addFloatingText(buyer, CONFIG.HALF_WIDTH / 2, menuY, sab.emoji + ' ' + CONFIG.TEXT.SABOTAGE_SENT, CONFIG.COLORS.POINTS);
+  sfx('buy');
+  sfx('sabotage');
+}
+
+// Count down the sabotage and its flashy effects.
+function updateSabotageTimers(p, dt) {
+  if (p.sabotage !== null) {
+    p.sabotage.timeLeft = p.sabotage.timeLeft - dt;
+    if (p.sabotage.timeLeft <= 0) {
+      p.sabotage = null;   // it wore off
+    }
+  }
+  if (p.announce !== null) {
+    p.announce.timeLeft = p.announce.timeLeft - dt;
+    if (p.announce.timeLeft <= 0) {
+      p.announce = null;
+    }
+  }
+  if (p.pendingSound !== null) {
+    p.pendingSound.timeLeft = p.pendingSound.timeLeft - dt;
+    if (p.pendingSound.timeLeft <= 0) {
+      sfx(p.pendingSound.name);
+      p.pendingSound = null;
+    }
+  }
+  p.flash = Math.max(0, p.flash - dt);
+  p.shake = Math.max(0, p.shake - dt);
+}
+
+
+// ============================================================================
+//  8. KEYS — single presses (movement is handled in moveChef)
+// ============================================================================
+
+function onKeyPressed(code) {
+  // M mutes on any screen
+  if (isOneOf(code, CONFIG.KEYS_MUTE)) {
+    toggleMute();
+    return;
+  }
+
+  if (state === 'title') {
+    startGame();   // any key starts
+    return;
+  }
+
+  if (state === 'over') {
+    if (isOneOf(code, CONFIG.KEYS_RESTART)) {
+      startGame();
+    }
+    return;
+  }
+
+  // Playing: was it a sabotage key?
+  for (var i = 0; i < players.length; i++) {
+    var p = players[i];
+    for (var j = 0; j < CONFIG.SABOTAGES.length; j++) {
+      var sab = CONFIG.SABOTAGES[j];
+      if (isOneOf(code, p.sabotageKeys[sab.id])) {
+        tryBuySabotage(p, sab);
+      }
+    }
+  }
+}
+
+
+// ============================================================================
+//  9. DRAWING — paint the whole picture, back to front, every frame
+// ============================================================================
+
+function draw(ctx) {
+  var C = CONFIG.COLORS;
+
+  ctx.fillStyle = C.BACKGROUND;
+  ctx.fillRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+
+  for (var i = 0; i < players.length; i++) {
+    drawHalf(ctx, players[i]);
+  }
+
+  // The line down the middle
+  ctx.fillStyle = C.DIVIDER;
+  ctx.fillRect(CONFIG.HALF_WIDTH - 2, 0, 4, CONFIG.HEIGHT);
+
+  drawFloatingTexts(ctx);
+
+  if (state === 'over') {
+    drawPlayAgain(ctx);
+  }
+  if (state === 'title') {
+    drawTitleScreen(ctx);
+  }
+  if (soundMuted) {
+    drawEmoji(ctx, '🔇', CONFIG.HALF_WIDTH, 22, 18);
+  }
+}
+
+// Draw one player's half. Everything inside is drawn as if the half started
+// at x = 0; "translate" slides the paintbrush over for P2.
+function drawHalf(ctx, p) {
+  ctx.save();
+
+  // "clip" = don't let any paint spill into the other player's half
+  ctx.beginPath();
+  ctx.rect(p.offsetX, 0, CONFIG.HALF_WIDTH, CONFIG.HEIGHT);
+  ctx.clip();
+
+  var shakeX = 0;
+  var shakeY = 0;
+  if (p.shake > 0) {
+    shakeX = (Math.random() * 2 - 1) * CONFIG.SABOTAGE_SHAKE_PIXELS;
+    shakeY = (Math.random() * 2 - 1) * CONFIG.SABOTAGE_SHAKE_PIXELS;
+  }
+  ctx.translate(p.offsetX + shakeX, shakeY);
+
+  drawScoreBar(ctx, p);
+  drawCustomerArea(ctx, p);
+  drawKitchenFloor(ctx, p);
+  drawCounter(ctx);
+  drawStations(ctx);
+  drawOven(ctx, p);
+  drawBin(ctx);
+  drawChef(ctx, p);
+  drawSaboteurStrip(ctx, p);
+  drawSabotageBadge(ctx, p);
+  drawFlash(ctx, p);
+  drawAnnouncement(ctx, p);
+  if (state === 'over') {
+    drawResult(ctx, p);
+  }
+
+  ctx.restore();
+}
+
+// --- Score bar: name tag, money, sabotage points, progress to target ---
+function drawScoreBar(ctx, p) {
+  var C = CONFIG.COLORS;
+  var bar = CONFIG.SCORE_BAR;
+  ctx.fillStyle = C.SCORE_BAR;
+  ctx.fillRect(0, bar.y, CONFIG.HALF_WIDTH, bar.h);
+
+  drawRoundRect(ctx, 8, bar.y + 7, 74, 26, 13, p.color, null);
+  drawText(ctx, p.name + ' ' + p.emoji, 45, bar.y + 20, 16, C.TEXT, 'center', true);
+
+  drawText(ctx, '$' + p.money, CONFIG.HALF_WIDTH / 2, bar.y + 20, 24, C.MONEY, 'center', true);
+  drawText(ctx, '/ $' + CONFIG.TARGET_MONEY, CONFIG.HALF_WIDTH / 2 + 50, bar.y + 22, 12, C.TEXT_DIM, 'left', false);
+
+  drawText(ctx, CONFIG.SABOTEUR_EMOJI + ' ' + p.points + ' ' + CONFIG.TEXT.POINTS_LABEL,
+           CONFIG.HALF_WIDTH - 10, bar.y + 20, 17, C.POINTS, 'right', true);
+
+  // Thin progress bar along the bottom: how close to the target
+  drawBar(ctx, 0, bar.y + bar.h - 4, CONFIG.HALF_WIDTH, 4, p.money / CONFIG.TARGET_MONEY, C.MONEY, C.BAR_BACK);
+}
+
+// --- Customer area: face, ticket, patience bar ---
+function drawCustomerArea(ctx, p) {
+  var C = CONFIG.COLORS;
+  var area = CONFIG.CUSTOMER_AREA;
+  var c = p.customer;
+
+  ctx.fillStyle = C.CUSTOMER_AREA;
+  ctx.fillRect(0, area.y, CONFIG.HALF_WIDTH, area.h);
+
+  if (c.state === 'empty') {
+    return;
+  }
+
+  // A leaving customer fades out and drifts up
+  var alpha = 1;
+  var lift = 0;
+  if (c.state === 'leaving') {
+    alpha = clamp(c.timer / CONFIG.CUSTOMER_LEAVE_SECONDS, 0, 1);
+    lift = (1 - alpha) * 20;
+  }
+  ctx.globalAlpha = alpha;
+
+  // The face (angry customers shake)
+  var faceX = CONFIG.CUSTOMER_X;
+  if (c.face === CONFIG.FACE_ANGRY) {
+    faceX = faceX + Math.sin(clock * 60) * 3;
+  }
+  drawEmoji(ctx, c.face, faceX, CONFIG.CUSTOMER_Y - lift, CONFIG.CUSTOMER_SIZE);
+
+  // The ticket, in the dish's colour
+  var dish = findDish(c.dishId);
+  var t = CONFIG.TICKET;
+  if (dish !== null) {
+    drawRoundRect(ctx, t.x, t.y - lift, t.w, t.h, 10, dish.ticketColor, C.TEXT, 3);
+    if (CONFIG.SHOW_RECIPE_ON_TICKET) {
+      drawEmoji(ctx, dish.emoji, t.x + t.w / 2, t.y + 26 - lift, 32);
+      drawRoundRect(ctx, t.x + 8, t.y + 50 - lift, t.w - 16, 26, 8, '#ffffffcc', null);
+      for (var i = 0; i < dish.ingredients.length; i++) {
+        var ix = t.x + t.w / 2 + (i - (dish.ingredients.length - 1) / 2) * 34;
+        drawEmoji(ctx, ingredientEmoji(dish.ingredients[i]), ix, t.y + 63 - lift, 20);
+      }
+    } else {
+      drawEmoji(ctx, dish.emoji, t.x + t.w / 2, t.y + t.h / 2 - lift, 44);
+    }
+  }
+
+  // Patience bar under the face (only while they're waiting)
+  if (c.state === 'waiting') {
+    var pb = CONFIG.PATIENCE_BAR;
+    var fraction = c.patience / CONFIG.CUSTOMER_PATIENCE_SECONDS;
+    var barColor = C.PATIENCE_GOOD;
+    if (fraction < 0.5) barColor = C.PATIENCE_MID;
+    if (fraction < 0.25) barColor = C.PATIENCE_LOW;
+    drawBar(ctx, pb.x, pb.y, pb.w, pb.h, fraction, barColor, C.BAR_BACK);
+    if (c.patience <= 0) {
+      // The bar is empty now, so write "LATE" right over it
+      drawText(ctx, CONFIG.TEXT.LATE, pb.x + pb.w / 2, pb.y + pb.h / 2, 13, C.WRONG, 'center', true, C.OUTLINE);
+    }
+  }
+
+  ctx.globalAlpha = 1;
+}
+
+// --- Checkerboard kitchen floor (goes buttery when slippery) ---
+function drawKitchenFloor(ctx, p) {
+  var C = CONFIG.COLORS;
+  var k = CONFIG.KITCHEN;
+  var size = CONFIG.FLOOR_TILE_SIZE;
+
+  for (var row = 0; row * size < k.h; row++) {
+    for (var col = 0; col * size < CONFIG.HALF_WIDTH; col++) {
+      if ((row + col) % 2 === 0) {
+        ctx.fillStyle = C.FLOOR_A;
+      } else {
+        ctx.fillStyle = C.FLOOR_B;
+      }
+      ctx.fillRect(col * size, k.y + row * size, size, size);
+    }
+  }
+
+  if (hasSabotage(p, 'slip')) {
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = C.SLIPPERY_TINT;
+    ctx.fillRect(0, k.y, CONFIG.HALF_WIDTH, k.h);
+    ctx.globalAlpha = 0.8;
+    for (var i = 0; i < CONFIG.BUTTER_SPOTS.length; i++) {
+      var spot = CONFIG.BUTTER_SPOTS[i];
+      drawEmoji(ctx, '🧈', spot.x, spot.y, 26);
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+// --- Serving counter under the customer ---
+function drawCounter(ctx) {
+  var C = CONFIG.COLORS;
+  var c = CONFIG.COUNTER;
+  drawRoundRect(ctx, c.x - c.w / 2, c.y - c.h / 2, c.w, c.h, 8, C.COUNTER, C.COUNTER_EDGE, 3);
+  drawText(ctx, c.label, c.x, c.y + 1, 16, C.TEXT, 'center', true, C.COUNTER_EDGE);
+}
+
+// --- Ingredient stations ---
+function drawStations(ctx) {
+  var C = CONFIG.COLORS;
+  var size = CONFIG.STATION_SIZE;
+  for (var i = 0; i < CONFIG.STATIONS.length; i++) {
+    var s = CONFIG.STATIONS[i];
+    var ingredient = findIngredient(s.ingredient);
+    drawRoundRect(ctx, s.x - size / 2, s.y - size / 2, size, size, 10, C.TILE, C.TILE_EDGE, 3);
+    if (ingredient !== null) {
+      drawEmoji(ctx, ingredient.emoji, s.x, s.y + 1, 34);
+      drawText(ctx, ingredient.name, s.x, s.y + size / 2 + 9, 11, C.TEXT_DARK, 'center', true);
+    }
+  }
+}
+
+// --- The oven: empty, cooking (with progress bar) or done (with plate) ---
+function drawOven(ctx, p) {
+  var C = CONFIG.COLORS;
+  var o = CONFIG.OVEN;
+  var oven = p.oven;
+  var half = o.size / 2;
+
+  drawRoundRect(ctx, o.x - half, o.y - half, o.size, o.size, 12, C.OVEN, C.OVEN_EDGE, 4);
+
+  if (oven.state === 'empty') {
+    ctx.globalAlpha = 0.5;
+    drawEmoji(ctx, o.emoji, o.x, o.y - 4, 38);
+    ctx.globalAlpha = 1;
+    drawText(ctx, o.label, o.x, o.y + half - 11, 11, C.TEXT, 'center', true);
+  } else if (oven.state === 'cooking') {
+    // Flickering flame with the ingredients sitting in it
+    var flicker = 36 + Math.sin(clock * 18) * 3;
+    drawEmoji(ctx, o.emoji, o.x, o.y + 6, flicker);
+    for (var i = 0; i < oven.contents.length; i++) {
+      var ix = o.x + (i - (oven.contents.length - 1) / 2) * 22;
+      drawEmoji(ctx, ingredientEmoji(oven.contents[i]), ix, o.y - 20, 18);
+    }
+    var fraction = 1 - oven.timeLeft / oven.totalTime;
+    drawBar(ctx, o.x - half, o.y + half + 6, o.size, 9, fraction, C.COOK_BAR, C.BAR_BACK);
+  } else if (oven.state === 'done') {
+    // Finished plate, bobbing
+    var bob = Math.sin(clock * 6) * 3;
+    ctx.fillStyle = C.TILE;
+    ctx.beginPath();
+    ctx.ellipse(o.x, o.y + 8 + bob, 30, 12, 0, 0, Math.PI * 2);
+    ctx.fill();
+    drawEmoji(ctx, dishEmoji(oven.dishId), o.x, o.y - 2 + bob, 40);
+    drawText(ctx, CONFIG.TEXT.OVEN_READY, o.x, o.y - half - 10, 14, C.GOLD, 'center', true, C.OUTLINE);
+  }
+
+  // 🧊 Frozen: ice block over the whole oven, with seconds left
+  if (hasSabotage(p, 'freeze')) {
+    ctx.globalAlpha = 0.6;
+    drawRoundRect(ctx, o.x - half - 4, o.y - half - 4, o.size + 8, o.size + 8, 14, C.FROZEN_TINT, '#ffffff', 3);
+    ctx.globalAlpha = 1;
+    drawEmoji(ctx, '🧊', o.x, o.y - 4, 50);
+    drawText(ctx, Math.ceil(p.sabotage.timeLeft) + 's', o.x, o.y + half - 12, 16, C.TEXT, 'center', true, C.OUTLINE);
+  }
+}
+
+// --- The bin ---
+function drawBin(ctx) {
+  var C = CONFIG.COLORS;
+  var b = CONFIG.BIN;
+  var half = b.size / 2;
+  drawRoundRect(ctx, b.x - half, b.y - half, b.size, b.size, 10, C.BIN, C.TILE_EDGE, 3);
+  drawEmoji(ctx, b.emoji, b.x, b.y - 3, 32);
+  drawText(ctx, b.label, b.x, b.y + half - 7, 10, C.TEXT, 'center', true);
+}
+
+// --- The chef, their floor ring, and what they're carrying ---
+function drawChef(ctx, p) {
+  var C = CONFIG.COLORS;
+  var size = CONFIG.CHEF_SIZE;
+
+  // Coloured ring on the floor so you can tell whose chef is whose
+  ctx.globalAlpha = 0.65;
+  ctx.fillStyle = p.color;
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y + size * 0.42, size * 0.6, size * 0.2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  if (hasSabotage(p, 'slip')) {
+    drawEmoji(ctx, '🧈', p.x + 18, p.y + size * 0.42, 18);
+  }
+
+  // The loser slumps over
+  if (state === 'over' && p.index !== winnerIndex) {
+    ctx.save();
+    ctx.translate(p.x, p.y + 8);
+    ctx.rotate(Math.PI / 2);
+    drawEmoji(ctx, CONFIG.CHEF_LOSER_EMOJI, 0, 0, size);
+    ctx.restore();
+    return;
+  }
+
+  // Little bounce while walking
+  var bob = 0;
+  if (p.moving && state === 'playing') {
+    bob = Math.abs(Math.sin(clock * 16)) * -4;
+  }
+  drawEmoji(ctx, p.emoji, p.x, p.y + bob, size);
+
+  // Carried things float over the chef's head
+  var carryY = p.y - size * 0.75 + bob;
+  var itemSize = CONFIG.HELD_ITEM_SIZE;
+  if (p.plate !== null) {
+    ctx.fillStyle = C.TILE;
+    ctx.beginPath();
+    ctx.ellipse(p.x, carryY + 7, 18, 7, 0, 0, Math.PI * 2);
+    ctx.fill();
+    drawEmoji(ctx, dishEmoji(p.plate), p.x, carryY, itemSize + 6);
+  } else {
+    for (var i = 0; i < p.held.length; i++) {
+      var ix = p.x + (i - (p.held.length - 1) / 2) * (itemSize + 2);
+      drawEmoji(ctx, ingredientEmoji(p.held[i]), ix, carryY, itemSize);
+    }
+  }
+}
+
+// --- Saboteur strip: the man in the trench coat and his price list ---
+function drawSaboteurStrip(ctx, p) {
+  var C = CONFIG.COLORS;
+  var strip = CONFIG.SABOTEUR_STRIP;
+  var midY = strip.y + strip.h / 2;
+
+  ctx.fillStyle = C.STRIP;
+  ctx.fillRect(0, strip.y, CONFIG.HALF_WIDTH, strip.h);
+  ctx.fillStyle = C.STRIP_EDGE;
+  ctx.fillRect(0, strip.y, CONFIG.HALF_WIDTH, 3);
+
+  drawEmoji(ctx, CONFIG.SABOTEUR_EMOJI, CONFIG.SABOTEUR_X, midY + 2, CONFIG.SABOTEUR_SIZE);
+
+  for (var i = 0; i < CONFIG.SABOTAGES.length; i++) {
+    var sab = CONFIG.SABOTAGES[i];
+    var x = CONFIG.SABOTAGE_MENU_X + i * CONFIG.SABOTAGE_MENU_SPACING;
+    var codes = p.sabotageKeys[sab.id];
+    var label = '?';
+    if (codes && codes.length > 0) {
+      label = keyLabel(codes[0]);
+    }
+
+    // Can't afford it? Draw it faded.
+    if (p.points < sab.cost) {
+      ctx.globalAlpha = 0.3;
+    }
+    drawRoundRect(ctx, x, midY - 14, 26, 28, 6, C.KEYCAP, null);
+    drawText(ctx, label, x + 13, midY + 1, 16, C.TEXT_DARK, 'center', true);
+    drawEmoji(ctx, sab.emoji, x + 46, midY + 1, 26);
+    drawText(ctx, sab.cost + CONFIG.TEXT.POINTS_LABEL, x + 62, midY + 1, 15, C.POINTS, 'left', true);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// --- "🧊 FROZEN 4s" badge in the corner while being sabotaged ---
+function drawSabotageBadge(ctx, p) {
+  if (p.sabotage === null) return;
+  var sab = findSabotage(p.sabotage.id);
+  if (sab === null) return;
+  var C = CONFIG.COLORS;
+  var b = CONFIG.COUNTDOWN_BADGE;
+  drawRoundRect(ctx, b.x, b.y, b.w, b.h, b.h / 2, '#000000bb', sab.flashColor, 2);
+  drawText(ctx, sab.emoji + ' ' + sab.shortName + ' ' + Math.ceil(p.sabotage.timeLeft) + 's',
+           b.x + b.w / 2, b.y + b.h / 2 + 1, 14, C.TEXT, 'center', true);
+}
+
+// --- Screen flash when a sabotage lands ---
+function drawFlash(ctx, p) {
+  if (p.flash <= 0 || p.announce === null) return;
+  var sab = findSabotage(p.announce.sabotageId);
+  if (sab === null) return;
+  ctx.globalAlpha = (p.flash / CONFIG.SABOTAGE_FLASH_SECONDS) * 0.7;
+  ctx.fillStyle = sab.flashColor;
+  ctx.fillRect(0, 0, CONFIG.HALF_WIDTH, CONFIG.HEIGHT);
+  ctx.globalAlpha = 1;
+}
+
+// --- Big "🧊 OVEN FREEZE!" across the victim's half ---
+function drawAnnouncement(ctx, p) {
+  if (p.announce === null) return;
+  var sab = findSabotage(p.announce.sabotageId);
+  if (sab === null) return;
+  var C = CONFIG.COLORS;
+
+  var shown = CONFIG.SABOTAGE_ANNOUNCE_SECONDS - p.announce.timeLeft;
+  var pop = clamp(0.5 + shown * 3, 0.5, 1);            // grows in quickly
+  var alpha = clamp(p.announce.timeLeft / 0.4, 0, 1);  // fades out at the end
+  var midX = CONFIG.HALF_WIDTH / 2;
+
+  ctx.globalAlpha = alpha * 0.65;
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 245, CONFIG.HALF_WIDTH, 140);
+  ctx.globalAlpha = alpha;
+  drawEmoji(ctx, sab.emoji, midX, 285, 70 * pop);
+  drawText(ctx, sab.name + '!', midX, 340, 34 * pop, sab.flashColor, 'center', true, C.OUTLINE);
+  drawText(ctx, CONFIG.TEXT.SABOTAGE_FROM.replace('{NAME}', p.announce.byName), midX, 368, 15, C.TEXT, 'center', false, C.OUTLINE);
+  ctx.globalAlpha = 1;
+}
+
+// --- After a win: gold for the winner, dim for the loser ---
+function drawResult(ctx, p) {
+  var C = CONFIG.COLORS;
+  var midX = CONFIG.HALF_WIDTH / 2;
+  if (p.index === winnerIndex) {
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = C.GOLD;
+    ctx.fillRect(0, 0, CONFIG.HALF_WIDTH, CONFIG.HEIGHT);
+    ctx.globalAlpha = 1;
+    var bounce = Math.sin(clock * 4) * 6;
+    drawEmoji(ctx, '🏆', midX, 250 + bounce, 90);
+    drawText(ctx, CONFIG.TEXT.WINS.replace('{NAME}', p.name), midX, 335, 52, C.GOLD, 'center', true, C.OUTLINE);
+  } else {
+    ctx.globalAlpha = 0.45;
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, CONFIG.HALF_WIDTH, CONFIG.HEIGHT);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawPlayAgain(ctx) {
+  var C = CONFIG.COLORS;
+  if (Math.floor(clock * 2) % 2 === 0) {
+    drawRoundRect(ctx, CONFIG.WIDTH / 2 - 170, 440, 340, 44, 22, '#000000cc', C.GOLD, 2);
+    drawText(ctx, CONFIG.TEXT.PLAY_AGAIN, CONFIG.WIDTH / 2, 463, 24, C.TEXT, 'center', true);
+  }
+}
+
+function drawFloatingTexts(ctx) {
+  for (var i = 0; i < floatingTexts.length; i++) {
+    var t = floatingTexts[i];
+    ctx.globalAlpha = clamp(t.timeLeft / CONFIG.FLOAT_TEXT_SECONDS * 1.5, 0, 1);
+    drawText(ctx, t.text, t.x, t.y, t.size, t.color, 'center', true, CONFIG.COLORS.OUTLINE);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// --- The title screen, drawn over a dimmed view of the two kitchens ---
+function drawTitleScreen(ctx) {
+  var C = CONFIG.COLORS;
+  var T = CONFIG.TEXT;
+  var midX = CONFIG.WIDTH / 2;
+
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = C.BACKGROUND;
+  ctx.fillRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+  ctx.globalAlpha = 1;
+
+  drawEmoji(ctx, '🥔', midX - 60, 120 + Math.sin(clock * 3) * 5, 60);
+  drawEmoji(ctx, CONFIG.PLAYERS[0].emoji, midX - 150, 125, 50);
+  drawEmoji(ctx, '🔥', midX + 60, 120 + Math.sin(clock * 3 + 1) * 5, 60);
+  drawEmoji(ctx, CONFIG.PLAYERS[1].emoji, midX + 150, 125, 50);
+
+  drawText(ctx, T.TITLE, midX, 205, 46, C.GOLD, 'center', true, C.OUTLINE);
+  drawText(ctx, T.SUBTITLE.replace('{TARGET}', CONFIG.TARGET_MONEY), midX, 250, 22, C.TEXT, 'center', true);
+
+  drawText(ctx, T.HOW_TO_PLAY, midX, 305, 16, C.TEXT, 'center', false);
+  drawText(ctx, T.HOW_TO_PLAY_2, midX, 332, 16, C.TEXT, 'center', false);
+
+  drawText(ctx, T.P1_CONTROLS, midX, 385, 17, CONFIG.PLAYERS[0].color, 'center', true);
+  drawText(ctx, T.P2_CONTROLS, midX, 415, 17, CONFIG.PLAYERS[1].color, 'center', true);
+
+  if (Math.floor(clock * 2) % 2 === 0) {
+    drawText(ctx, T.PRESS_START, midX, 485, 28, C.TEXT, 'center', true, C.OUTLINE);
+  }
+  drawText(ctx, T.MUTE_HINT, midX, 560, 13, C.TEXT_DIM, 'center', false);
+}
+
+
+// ============================================================================
+//  10. GO!
+// ============================================================================
+
+resetGame();   // so the title screen has two kitchens behind it
+startLoop(update, draw, onKeyPressed);

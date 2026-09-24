@@ -1,5 +1,5 @@
 // ============================================================================
-//  SPUD RUSH — SETTINGS
+//  SPUD RUSH: KITCHEN WARS — SETTINGS
 // ============================================================================
 //
 //  THIS IS THE FILE TO FIDDLE WITH.
@@ -8,11 +8,18 @@
 //  does anything clever — it is just a long list of labelled values. Change
 //  one, save the file, press F5 in the browser, and the game changes.
 //
-//  You cannot break the game permanently by editing this file. If something
-//  goes wrong, undo your change (Ctrl+Z), save, press F5.
+//  Editing tips:
+//    - Keep the comma at the end of each line. A missing comma is the most
+//      common reason the screen goes blank.
+//    - Words go inside 'single quotes'. If your words need an apostrophe
+//      (like don't), wrap them in "double quotes" instead.
+//    - Numbers never need quotes.
+//    - If you break it: Ctrl+Z to undo, save, F5.
 //
-//  A "second" is a real second. A "pixel" is a dot on the screen, and the
-//  whole kitchen is 500 dots wide and 500 dots tall.
+//  A "pixel" is a dot on the game screen. The whole game is 900 dots wide and
+//  600 dots tall. Each player gets half: 450 wide. Positions below are
+//  measured inside ONE half, from its top-left corner — both halves use the
+//  same numbers, so a change here moves things in both kitchens.
 //
 // ============================================================================
 
@@ -22,448 +29,358 @@ var CONFIG = {
   //  THE SCREEN
   // ==========================================================================
 
-  // The size of the kitchen, in pixels. The game always thinks it is this
-  // size no matter how big the window is — CSS stretches it to fit.
-  WIDTH: 500,
-  HEIGHT: 500,
+  WIDTH: 900,           // whole game width. Leave this be.
+  HEIGHT: 600,          // whole game height. Leave this be.
+  HALF_WIDTH: 450,      // one player's half. Leave this be.
 
-  // How many real dots we draw per game pixel. 2 means the picture is drawn
-  // at double resolution so it stays sharp on a good screen. Leave this be.
-  SHARPNESS: 2,
+  // How many real dots we draw per game pixel. 2 keeps emoji sharp.
+  // Drop to 1 if the game feels slow on an old laptop.
+  RENDER_SCALE: 2,
 
+  // The longest single step of time the game will take, in seconds. Stops
+  // everything teleporting if the laptop hiccups. Leave this be.
+  MAX_DT: 0.05,
 
-  // ==========================================================================
-  //  THE CHEFS (the two robots you drive)
-  // ==========================================================================
-  //
-  //  Two players, one kitchen. Both chefs share the coins, the lives and the
-  //  best score. Each one has its own battery and its own hands.
-
-  CHEF_SPEED: 140,        // pixels per second. Higher = faster running.
-  CHEF_WIDTH: 48,         // how wide each chef is drawn
-  CHEF_HEIGHT: 66,        // how tall each chef is drawn
-
-  // Where each chef stands when a round begins. Both spots must be inside the
-  // walk box below, and at least a chef's width (48) apart so they don't
-  // start on top of each other.
-  P1_START_X: 210,
-  P1_START_Y: 300,
-  P2_START_X: 290,
-  P2_START_Y: 300,
-
-  // Each player's colour. It's used for the ring on the floor under their
-  // chef, the little number over its head, their battery in the top corner,
-  // and the glow around whatever their action key will use.
-  P1_COLOUR: '#ff3b8d',   // pink
-  P2_COLOUR: '#2979ff',   // blue
-
-  // How close a chef has to be to a station before the action key will work
-  // on it. Bigger number = more forgiving. 38 is about a chef-and-a-half.
-  REACH: 38,
-
-  // Standing on open floor with nothing in reach, the action key puts down
-  // whatever you're holding — and picks it up again if your hands are empty.
-  // This is how close you have to be to a potato on the floor to pick it up.
-  DROP_REACH: 30,
-
-  // The box his FEET are allowed to stay inside. He can't walk outside this.
-  // His head and body are allowed to overlap the furniture, which is what
-  // makes it look like a kitchen instead of a chessboard.
-  WALK_LEFT: 110,
-  WALK_RIGHT: 390,
-  WALK_TOP: 168,
-  WALK_BOTTOM: 398,
+  // Fonts already installed on the laptop (nothing is downloaded).
+  FONT_TEXT: '"Segoe UI", Arial, "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif',
+  FONT_EMOJI: '"Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif',
 
 
   // ==========================================================================
-  //  THE OVEN — the most important numbers in the game
+  //  WINNING AND SCORING
   // ==========================================================================
-  //
-  //  A potato put in the oven passes through four stages. These numbers are
-  //  how many seconds it takes to reach each one.
-  //
-  //     0 seconds  ............  RAW      (pale, unchanged)
-  //     COOKED_AT  ............  COOKED   (golden brown)
-  //     BURNT_AT   ............  BURNT    (black, smoking) - people order this!
-  //     RUINED_AT  ............  RUINED   (grey lump, bin it)
-  //
-  //  Making the gaps SMALLER makes the game harder and more frantic.
-  //  Making them BIGGER makes it gentler. If the room finds it stressful,
-  //  this is the first thing to change.
 
-  OVEN_COOKED_AT: 3,
-  OVEN_BURNT_AT: 8,
-  OVEN_RUINED_AT: 13,
+  TARGET_MONEY: 1000,   // first player to this many dollars wins. 600 = shorter game.
+
+  PAY_ON_TIME: 100,     // $ for the right dish before the patience bar runs out
+  POINTS_ON_TIME: 2,    // sabotage points for the same
+  PAY_LATE: 50,         // $ for the right dish AFTER the patience bar ran out
+  POINTS_LATE: 1,       // sabotage points for the same
+  PAY_WRONG: 0,         // $ for the wrong dish (or Mystery Slop)
+  POINTS_WRONG: 0,      // sabotage points for the same
 
 
   // ==========================================================================
-  //  THE CUSTOMERS
+  //  THE CHEFS
   // ==========================================================================
 
-  // Seconds between new customers arriving. This is a GAP, not a rate — a
-  // BIGGER number means FEWER customers. To cut the crowd by a quarter you
-  // divide by 0.75, which is how 1.75 became 2.33.
-  SPAWN_EVERY: 2.33,
-  PATIENCE: 30,           // seconds a customer waits before storming off
+  CHEF_SPEED: 260,      // pixels per second. Higher = faster running.
+  CHEF_SIZE: 44,        // how big the chef emoji is drawn
+  MAX_HELD: 3,          // most ingredients a chef can carry at once
+  HELD_ITEM_SIZE: 20,   // size of the little emoji floating over the chef's head
+  CHEF_LOSER_EMOJI: '😵', // what the losing chef turns into
 
-  // The first two customers get an easier time of it, so nobody loses in the
-  // first ten seconds while they're still working out the controls.
-  // 1.5 means "half again as much patience as normal".
-  BEGINNER_PATIENCE_BONUS: 1.5,
+  // Hitboxes: the invisible box used to decide "are these two touching?".
+  // 0.75 means the box is 75% of the drawn size — a bit forgiving, which
+  // feels fair. 1 = exact edges (feels harsh). 0.5 = must be right on it.
+  HITBOX_SCALE: 0.75,
 
-  // How the game gets harder the longer you survive.
-  // Customers arrive faster, and they get less patient.
-  SPAWN_RAMP_SECONDS: 200,   // after this long, spawning is at its fastest
-  SPAWN_FASTEST: 0.4,        // 0.4 = arrive 2.5x as often as at the start
-  PATIENCE_RAMP_SECONDS: 260,
-  PATIENCE_SHORTEST: 0.45,   // 0.45 = under half the patience they started with
+  // One entry per player. P1 is the left half, P2 is the right half.
+  // Key names: KeyW = the W key, ArrowUp = up arrow, Digit1 = the 1 above
+  // the letters, Numpad7 = the 7 on the number pad.
+  PLAYERS: [
+    {
+      name: 'P1',
+      emoji: '👨‍🍳',
+      color: '#3aa0ff',            // blue: floor ring, name tag
+      startX: 225,                 // where the chef stands when a round starts
+      startY: 250,
+      keys: {
+        up:    ['KeyW'],
+        down:  ['KeyS'],
+        left:  ['KeyA'],
+        right: ['KeyD']
+      },
+      // Which key buys which sabotage. The names match SABOTAGES further down.
+      sabotageKeys: {
+        freeze: ['Digit1'],
+        slip:   ['Digit2']
+        // Saved for later rounds:
+        // rat:   ['Digit3'],
+        // karen: ['Digit4']
+      }
+    },
+    {
+      name: 'P2',
+      emoji: '👩‍🍳',
+      color: '#ff5c8a',            // pink
+      startX: 225,
+      startY: 250,
+      keys: {
+        up:    ['ArrowUp'],
+        down:  ['ArrowDown'],
+        left:  ['ArrowLeft'],
+        right: ['ArrowRight']
+      },
+      sabotageKeys: {
+        freeze: ['Digit7', 'Numpad7'],
+        slip:   ['Digit8', 'Numpad8']
+        // Saved for later rounds:
+        // rat:   ['Digit9', 'Numpad9'],
+        // karen: ['Digit0', 'Numpad0']
+      }
+    }
+  ],
 
-
-  // ==========================================================================
-  //  SCORING
-  // ==========================================================================
-
-  PAY_BASE: 10,           // coins for any correct potato
-  PAY_SPEED_BONUS: 20,    // extra coins, scaled by how much patience was left
-  // Angry customers before the kitchen closes. The hearts in the top right
-  // lay themselves out to fit, so you can put any number here.
-  STRIKES_ALLOWED: 10,
-
-
-  // ==========================================================================
-  //  THE CHEFS' BATTERIES
-  // ==========================================================================
-  //
-  //  Each chef runs on its own battery, shown as a yellow bar above its head
-  //  and again in the top right corner. It drains the whole time it's working.
-  //
-  //     FULL battery  ->  full running speed
-  //     HALF battery  ->  noticeably sluggish
-  //     FLAT battery  ->  that chef collapses on the spot, and its player's
-  //                       keys stop working. The OTHER chef can pick it up
-  //                       (empty hands, action key) and carry it to the
-  //                       charging pad to wake it up. If BOTH chefs are flat
-  //                       at once, the round ends.
-  //
-  //  To fill it back up a chef stands on the charging pad in the top right.
-  //  No key needed — just walking onto it is enough.
-  //
-  //  This is the second clock in the game, running against the oven and the
-  //  customers. If the room finds it punishing, make BATTERY_LASTS bigger.
-
-  BATTERY_LASTS: 75,          // seconds from full to flat if you never charge
-  BATTERY_SLOWEST: 0.35,      // speed on a nearly-flat battery (0.35 = a third)
-  BATTERY_RECHARGE_RATE: 70,  // how much of the bar refills per second on the pad
-  BATTERY_LOW_AT: 25,         // below this the bar turns red and flashes
-
-  // Where the charging pad sits. It is in the top right of the kitchen floor,
-  // deliberately across the room from the ovens so topping up costs you time.
-  CHARGER_X: 304,
-  CHARGER_Y: 166,
-  CHARGER_WIDTH: 48,
-  CHARGER_HEIGHT: 64,
-
-  // How close his feet have to get to the base of the pad to start charging.
-  // This is a circle around the bottom of the pad, not a box.
-  CHARGER_GRIP: 34,
-
-  BATTERY_FULL_COLOUR: '#f2c230',   // the yellow bar
-  BATTERY_LOW_COLOUR: '#e0483c',    // what it turns when it's nearly flat
-  CHARGE_SPARK: '#fff6b0',          // the sparks that fly while charging
+  KEYS_RESTART: ['KeyR'],   // play again after someone wins
+  KEYS_MUTE: ['KeyM'],      // sound on / off
 
 
   // ==========================================================================
-  //  HELPER ROBOTS (the parts table)
+  //  LAYOUT OF ONE HALF (top to bottom)
   // ==========================================================================
   //
-  //  Walk to the parts table in the top left and, with EMPTY hands, press
-  //  your action key to build a helper robot. It reads the customers' orders
-  //  and fulfils them on its own.
-  //
-  //  Helpers run on batteries (see HELPER_BATTERY_LASTS below). They are lost
-  //  when you restart.
-  //
-  //  With the numbers below the robots cost 1, 2, 4, 9 and 20 coins — cheap,
-  //  so the room can see them working straight away. Put HELPER_FIRST_COST
-  //  back up to about 60 once everyone has had a play, or the game gives
-  //  itself away in the first twenty seconds.
+  //   y 0   - 44   score bar     (name, money, sabotage points)
+  //   y 44  - 140  customer area (the customer, their ticket, patience bar)
+  //   y 140 - 540  kitchen floor (stations, oven, bin, chef)
+  //   y 540 - 600  saboteur strip (the man in the trench coat and his menu)
 
-  HELPER_FIRST_COST: 1,         // coins for helper number one
-  HELPER_COST_MULTIPLIER: 2.2,  // each one costs this much more than the last
-  // The most you can have at once. Set to 0 for no limit at all — the price
-  // doubling over and over is what stops you, not a rule.
-  //
-  // Worth knowing: helpers only work when there is a customer nobody else has
-  // claimed, and only BAY_COUNT customers fit in the hatch. So past about six
-  // robots the extra ones mostly stand around looking pleased with themselves.
-  HELPER_MAX: 0,
+  SCORE_BAR:      { y: 0,   h: 44 },
+  CUSTOMER_AREA:  { y: 44,  h: 96 },
+  KITCHEN:        { y: 140, h: 400 },
+  SABOTEUR_STRIP: { y: 540, h: 60 },
 
-  // How fast helpers walk compared to you, at full battery. Deliberately
-  // slower — if they were as quick as you, the game would play itself.
-  HELPER_SPEED: 0.7,
+  // The chef's centre can never leave this box.
+  WALK_BOX: { left: 25, right: 425, top: 190, bottom: 516 },
 
-  // A short pause at each station so you can see them working rather than
-  // snapping from place to place.
-  HELPER_PAUSE: 0.35,
+  FLOOR_TILE_SIZE: 30,     // size of the checkerboard floor tiles
 
-  // Helpers run on batteries too. When one goes flat it collapses on the spot
-  // and stays there until a chef carries it to the charging pad. Walk up to a
-  // collapsed robot with empty hands, press your action key to hoist it, then
-  // stand on the pad.
-  HELPER_BATTERY_LASTS: 22.5,   // seconds of work before a helper collapses
-  // How close you must be to pick up a flat robot — a helper, or the other
-  // chef when its battery has run out.
-  HELPER_PICKUP_REACH: 34,
+  // Customer area pieces
+  CUSTOMER_X: 110,         // the customer's face
+  CUSTOMER_Y: 84,
+  CUSTOMER_SIZE: 48,
+  PATIENCE_BAR: { x: 50, y: 118, w: 120, h: 10 },
+  TICKET: { x: 250, y: 50, w: 130, h: 84 },   // the coloured order ticket
+  SHOW_RECIPE_ON_TICKET: true,                // show the 3 ingredients on the ticket
 
-  HELPER_SCALE: 0.88,           // drawn slightly smaller than you
-  HELPER_TINTS: ['#4fc3f7', '#9ccc65', '#ff8a65', '#ba68c8'],  // floor ring colours
+  // Little "time left" badge that appears when you've been sabotaged
+  COUNTDOWN_BADGE: { x: 8, y: 148, w: 128, h: 28 },
 
-  // The parts table, top left of the floor.
-  //
-  // CAREFUL: do not move this further left. The Large garden bed is reached
-  // from about x 110-124, and a table sitting on top of those few spots makes
-  // that bed impossible to use.
-  // It also must not sit in the strip just below the hatch (y 168-190), or it
-  // steals the spot you stand on to serve a customer.
-  PARTS_X: 150,
-  PARTS_Y: 208,
-  PARTS_WIDTH: 60,
-  PARTS_HEIGHT: 52,
-
-  // How close your feet must be to the FRONT of the parts table (the middle
-  // of its bottom edge) before the action key will buy a robot there.
-  //
-  // The table stands out on the open floor, unlike everything else, which
-  // sits against a wall. Measured from its whole outline, a big patch of
-  // floor all the way round it would count as "at the table". Measured from
-  // one spot at the front, it takes up about as much floor as the other
-  // stations do. Bigger number = easier to hit.
-  PARTS_REACH: 24,
+  // Saboteur strip pieces
+  SABOTEUR_EMOJI: '🕵️',
+  SABOTEUR_X: 30,
+  SABOTEUR_SIZE: 38,
+  SABOTAGE_MENU_X: 66,         // where the first menu item starts
+  SABOTAGE_MENU_SPACING: 125,  // gap between menu items. Shrink to ~95 for 4 items.
 
 
   // ==========================================================================
-  //  WHERE EVERYTHING SITS
+  //  STATIONS (where things are in the kitchen)
   // ==========================================================================
   //
-  //  Positions are measured from the TOP-LEFT corner of the kitchen.
-  //  x = how far across.  y = how far down.
-  //
-  //  Moving a station here moves both the picture AND the spot the chef has
-  //  to stand — they can never drift apart.
+  //  x = across (0 left wall, 450 right wall), y = down (140 top of kitchen,
+  //  540 bottom). Keep stations at least 70 apart or they will overlap.
+  //  There is room for more stations later (e.g. y 190 or y 500 along the walls).
 
-  // The three garden beds, stacked down the left wall.
-  //
-  // The chef reaches these from their RIGHT-HAND edge, which needs to stay at
-  // about x=86. So if you make the beds narrower, push BED_X right by the
-  // same amount to keep that edge where it is — otherwise he can't reach them.
-  //
-  // Up and down, the usable band is y 182 to 386. Above that the serving
-  // hatch is nearer and steals the highlight; below it, the bin does.
-  //
-  // Keep BED_WIDTH and BED_HEIGHT at roughly 6:7 or the artwork looks squashed.
-  BED_X: 24,
-  BED_TOP: 150,
-  BED_GAP: 80,            // vertical distance from one bed to the next
-  BED_WIDTH: 62,
-  BED_HEIGHT: 72,
+  STATION_SIZE: 56,
 
-  // The four paint jars, stacked down the right wall.
-  //
-  // CAREFUL with these two. The chef can only walk as far right as 390, and
-  // he can only use something within 38 pixels of him. So the jars have to
-  // start at 428 or less, or he can never reach them. 424 leaves a little
-  // room to spare.
-  //
-  // The same trap applies up and down: above y=192 the serving hatch is
-  // nearer than the jar and steals it, and below y=370 oven B does. Keep the
-  // whole column between those two numbers.
-  JAR_X: 424,
-  JAR_TOP: 200,
-  JAR_GAP: 44,
-  JAR_WIDTH: 36,
-  JAR_HEIGHT: 40,
+  // Ingredient stations. Walk into one to pick up its ingredient.
+  // The "ingredient" word must match an id in INGREDIENTS below.
+  STATIONS: [
+    { ingredient: 'patty',   x: 50,  y: 240 },
+    { ingredient: 'cheese',  x: 50,  y: 340 },
+    { ingredient: 'fries',   x: 50,  y: 440 },
+    { ingredient: 'potato',  x: 400, y: 240 },
+    { ingredient: 'ketchup', x: 400, y: 340 },
+    { ingredient: 'beans',   x: 400, y: 440 }
+  ],
 
-  // The bin, bottom left.
-  BIN_X: 90,
-  BIN_Y: 410,
-  BIN_WIDTH: 60,
-  BIN_HEIGHT: 78,
-
-  // The two ovens along the bottom.
-  OVEN_POSITIONS: [ { x: 168, y: 404 }, { x: 296, y: 404 } ],
-  OVEN_WIDTH: 112,
-  OVEN_HEIGHT: 84,
-
-  // The serving hatch in the back wall, and the three customer bays in it.
-  HATCH_X: 40,
-  HATCH_Y: 18,
-  HATCH_WIDTH: 420,
-  HATCH_HEIGHT: 82,
-  // How many customers can be waiting at once, and how wide each one's slot
-  // in the hatch is. These two multiply out to the hatch width: 6 x 70 = 420.
-  // Change one and you must change the other, or the last customer will be
-  // drawn off the end of the hole in the wall.
-  //
-  // More customers means each one is drawn smaller — everything below is
-  // worked out from BAY_WIDTH, so the robots and their speech bubbles shrink
-  // to fit automatically.
-  BAY_COUNT: 6,
-  BAY_WIDTH: 70,
-  BAY_REACH_HEIGHT: 140,  // how far DOWN from the hatch the chef can serve
+  OVEN:    { x: 225, y: 350, size: 78, emoji: '🔥', label: 'OVEN' },
+  BIN:     { x: 225, y: 495, size: 56, emoji: '🗑️', label: 'BIN' },
+  // The serving counter, just under the customer. Walk into it holding a plate.
+  COUNTER: { x: 225, y: 168, w: 170, h: 40, label: '🛎️ SERVE' },
 
 
   // ==========================================================================
-  //  THE POTATOES
+  //  INGREDIENTS (all of them, even ones without a station yet)
   // ==========================================================================
+  //  If an emoji shows as an empty box on your laptop, swap it for another.
 
-  // The three sizes. These names must match the picture filenames.
-  SIZES: ['large', 'xlarge', 'poggolithic'],
-
-  // The five colours. 'natural' means never dunked.
-  COLOURS: ['natural', 'red', 'blue', 'green', 'yellow'],
-
-  // The four paint jars, in the order they appear down the right wall.
-  JAR_COLOURS: ['red', 'blue', 'green', 'yellow'],
-
-  // The burnt/cooked marks are drawn bigger on bigger potatoes.
-  OVERLAY_SCALE: { large: 1, xlarge: 1.3, poggolithic: 1.6 },
-
-  // How big potatoes are drawn in different places on screen.
-  POTATO_IN_HANDS: 0.8,
-  POTATO_IN_OVEN: 0.7,
-  POTATO_IN_BUBBLE: 0.62,
-  POTATO_ON_FLOOR: 0.7,
+  INGREDIENTS: [
+    { id: 'patty',   emoji: '🍔', name: 'Patty' },
+    { id: 'fries',   emoji: '🍟', name: 'Fries' },
+    { id: 'ketchup', emoji: '🥫', name: 'Ketchup' },
+    { id: 'potato',  emoji: '🥔', name: 'Potato' },
+    { id: 'cheese',  emoji: '🧀', name: 'Cheese' },
+    { id: 'beans',   emoji: '🫘', name: 'Beans' },
+    { id: 'steak',   emoji: '🥩', name: 'Steak' },
+    { id: 'greens',  emoji: '🥦', name: 'Greens' },
+    { id: 'fish',    emoji: '🐟', name: 'Fish' },
+    { id: 'lemon',   emoji: '🍋', name: 'Lemon' },
+    { id: 'shell',   emoji: '🌮', name: 'Taco Shell' },
+    { id: 'chilli',  emoji: '🌶️', name: 'Chilli' }
+  ],
 
 
   // ==========================================================================
-  //  COLOURS AND LOOK
-  // ==========================================================================
-
-  INK: '#2a2320',               // the dark outline colour used for text
-  // (The pulsing glow round whatever a chef's action key will use is drawn
-  // in that player's colour — see P1_COLOUR and P2_COLOUR up top.)
-
-  // The splash of paint that puffs out when you dunk a potato.
-  PAINT_SPLASH: { red: '#d9392b', blue: '#2f6fd6', green: '#3aa845', yellow: '#f2c230' },
-
-  SOIL_PUFF: '#6b4a2f',         // dust when you pull a potato up
-  BIN_PUFF: '#9a9a94',          // dust when you bin one
-
-  // A chunky font that is already on every Windows machine. We are not
-  // allowed to download one, so this is the next best thing.
-  FONT: '"Arial Black", "Segoe UI Black", Impact, system-ui, sans-serif',
-
-
-  // ==========================================================================
-  //  THE NOISE
+  //  DISHES (what customers order)
   // ==========================================================================
   //
-  //  There are no sound files. Every noise is built by the browser as it is
-  //  needed. These numbers control how loud it all is.
-  //
-  //  Volumes run from 0 (silent) to 1 (full). If the room finds it annoying,
-  //  turn MASTER_VOLUME down rather than switching it off — the oven chime
-  //  and the battery beep are genuinely useful to hear.
-  //
-  //  Press M in the game to mute.
+  //  enabled: true  = customers can order it.
+  //  To switch a dish on, set enabled: true AND make sure every one of its
+  //  ingredients has a station in STATIONS above — otherwise nobody can make it.
+  //  cookSeconds = how long it sits in the oven.
 
-  SOUND_ON: true,           // set to false for a permanently silent game
-  MASTER_VOLUME: 0.5,       // the overall knob
-  SFX_VOLUME: 0.7,          // beeps, thuds and dings
-  MUSIC_VOLUME: 0.35,       // the background tune, deliberately well underneath
+  DISHES: [
+    { id: 'burger', name: 'Burger & Fries',     emoji: '🍔', ticketColor: '#e5483b', // tomato red
+      ingredients: ['patty', 'fries', 'ketchup'], cookSeconds: 4, enabled: true },
 
-  // The tune speeds up as the round gets harder, using the same clock that
-  // makes customers arrive faster.
-  MUSIC_BPM_START: 100,
-  MUSIC_BPM_MAX: 140,
-  MUSIC_RAMP_SECONDS: 200,
+    { id: 'jacket', name: 'Loaded Jacket Spud', emoji: '🧀', ticketColor: '#f2a900', // marigold yellow
+      ingredients: ['potato', 'cheese', 'beans'], cookSeconds: 5, enabled: true },
 
-  // Helper robots make their noises quieter than you do, so that five robots
-  // working at once doesn't drown out what YOU are doing.
-  HELPER_SOUND_GAIN: 0.35,
+    { id: 'steak',  name: 'Steak & Mash',       emoji: '🥩', ticketColor: '#6a3fa0', // deep purple
+      ingredients: ['steak', 'potato', 'greens'], cookSeconds: 6, enabled: false },
 
-  // The same sound can't repeat faster than this, in seconds. Stops a busy
-  // kitchen turning into a machine gun.
-  SOUND_THROTTLE: 0.06,
+    { id: 'fish',   name: 'Fish & Chips',       emoji: '🐟', ticketColor: '#1e73be', // ocean blue
+      ingredients: ['fish', 'fries', 'lemon'],    cookSeconds: 5, enabled: false },
+
+    { id: 'taco',   name: 'Spicy Potato Taco',  emoji: '🌮', ticketColor: '#7cb342', // lime green
+      ingredients: ['shell', 'potato', 'chilli'], cookSeconds: 4, enabled: false }
+  ],
+
+  // What comes out of the oven if the 3 ingredients don't make any dish.
+  // Serving it counts as a wrong dish.
+  SLOP: { id: 'slop', name: 'Mystery Slop', emoji: '🤢', cookSeconds: 3 },
 
 
   // ==========================================================================
-  //  THE KEYS
+  //  CUSTOMERS
+  // ==========================================================================
+
+  CUSTOMER_PATIENCE_SECONDS: 20,  // how long the patience bar lasts
+  CUSTOMER_LEAVE_SECONDS: 0.8,    // how long a served customer hangs about before leaving
+  CUSTOMER_GAP_SECONDS: 1.0,      // empty counter time before the next customer arrives
+
+  CUSTOMER_FACES: ['🧑', '👩', '👨', '👵', '👴', '🧔', '👱', '👷'],
+  FACE_IMPATIENT: '😤',   // patience bar ran out
+  FACE_HAPPY: '😋',       // served on time
+  FACE_LATE: '😒',        // served late
+  FACE_ANGRY: '😡',       // served the wrong thing
+
+
+  // ==========================================================================
+  //  SABOTAGE (the man in the trench coat)
   // ==========================================================================
   //
-  //  Keys are named by WHERE they are on the keyboard, not by what they type,
-  //  so Num Lock and Shift make no difference:
-  //
-  //     'KeyW'     the W key
-  //     'Numpad8'  8 on the number pad, on the right of a full keyboard
-  //     'Digit8'   8 on the row of numbers along the top
-  //
-  //  Each action can have more than one key — list them all in the brackets.
-  //  Player 2 gets both the number pad AND the top row, because a lot of
-  //  laptops have no number pad at all.
-  //
-  //  If you change a key here, change the words further down to match, and
-  //  the line of help text under the game in index.html.
+  //  Paid for with sabotage POINTS, not dollars. Hits the OTHER player.
+  //  Only one sabotage can be running on a player at a time.
+  //  cost = points, seconds = how long it lasts.
+  //  The id must match the names in each player's sabotageKeys above.
 
-  P1_KEYS: {
-    up:     ['KeyW'],
-    down:   ['KeyS'],
-    left:   ['KeyA'],
-    right:  ['KeyD'],
-    action: ['KeyE']
+  SABOTAGES: [
+    { id: 'freeze', name: 'OVEN FREEZE',    shortName: 'FROZEN',   emoji: '🧊',
+      cost: 3, seconds: 6, sound: 'freeze', flashColor: '#9fe8ff' },
+
+    { id: 'slip',   name: 'SLIPPERY FLOOR', shortName: 'SLIPPERY', emoji: '🧈',
+      cost: 4, seconds: 6, sound: 'slip',   flashColor: '#ffe066' }
+
+    // Saved for later rounds (need code in game.js too):
+    // { id: 'rat',   name: 'RAT RAID',   emoji: '🐀', cost: 5, ... },
+    // { id: 'karen', name: 'KAREN CALL', emoji: '😡', cost: 6, ... }
+  ],
+
+  SABOTAGE_ANNOUNCE_SECONDS: 1.6,   // how long the big announcement stays up
+  SABOTAGE_FLASH_SECONDS: 0.35,     // how long the screen flash lasts
+  SABOTAGE_SHAKE_SECONDS: 0.35,     // how long the victim's half shakes
+  SABOTAGE_SHAKE_PIXELS: 7,         // how hard it shakes
+  SABOTAGE_EFFECT_SOUND_DELAY: 0.3, // seconds between the "sabotage" sting and the freeze/slip sound
+
+  // Where the little butter blobs appear on a slippery floor (decoration only)
+  BUTTER_SPOTS: [
+    { x: 140, y: 230 }, { x: 310, y: 280 }, { x: 130, y: 410 },
+    { x: 320, y: 450 }, { x: 225, y: 440 }, { x: 225, y: 250 }
+  ],
+
+
+  // ==========================================================================
+  //  FLOATING TEXT ("+$100" that drifts up after a serve)
+  // ==========================================================================
+
+  FLOAT_TEXT_SECONDS: 1.3,   // how long it stays on screen
+  FLOAT_TEXT_RISE: 40,       // how fast it drifts up, pixels per second
+
+
+  // ==========================================================================
+  //  SOUND
+  // ==========================================================================
+
+  SOUND_VOLUME: 0.4,         // 0 = silent, 1 = loud. M mutes during play.
+
+
+  // ==========================================================================
+  //  COLOURS
+  // ==========================================================================
+  //  Written as #rrggbb. Search "color picker" in a browser to find codes.
+
+  COLORS: {
+    BACKGROUND:     '#14121c',
+    DIVIDER:        '#000000',
+    SCORE_BAR:      '#23202f',
+    CUSTOMER_AREA:  '#3b2f2a',
+    FLOOR_A:        '#d9d2c3',
+    FLOOR_B:        '#cbc3b2',
+    STRIP:          '#1d1530',
+    STRIP_EDGE:     '#4a3a6b',
+    TILE:           '#fff8ec',
+    TILE_EDGE:      '#8a7a66',
+    OVEN:           '#3a3a44',
+    OVEN_EDGE:      '#15151a',
+    COUNTER:        '#a0673a',
+    COUNTER_EDGE:   '#5e3a1e',
+    BIN:            '#6e7b85',
+    TEXT:           '#ffffff',
+    TEXT_DARK:      '#2a2a2a',
+    TEXT_DIM:       '#9a93ad',
+    OUTLINE:        '#000000',
+    MONEY:          '#7ddc6a',
+    POINTS:         '#c69cff',
+    GOLD:           '#ffd700',
+    BAR_BACK:       '#00000066',
+    PATIENCE_GOOD:  '#5fd35f',
+    PATIENCE_MID:   '#f2b134',
+    PATIENCE_LOW:   '#e5483b',
+    COOK_BAR:       '#ff9a3c',
+    FROZEN_TINT:    '#bff0ff',
+    SLIPPERY_TINT:  '#ffe066',
+    HINT:           '#ffe9a8',
+    WRONG:          '#ff6b6b',
+    KEYCAP:         '#ece6f7'
   },
 
-  P2_KEYS: {
-    up:     ['Numpad8', 'Digit8'],
-    down:   ['Numpad5', 'Digit5'],
-    left:   ['Numpad4', 'Digit4'],
-    right:  ['Numpad6', 'Digit6'],
-    action: ['Numpad7', 'Digit7']
-  },
-
-  RESTART_KEY: 'KeyR',    // starts a new round once the kitchen has closed
-  MUTE_KEY: 'KeyM',       // sound off and on
-
 
   // ==========================================================================
-  //  THE WORDS ON SCREEN
+  //  WORDS ON SCREEN
   // ==========================================================================
+  //  {TARGET} gets swapped for TARGET_MONEY. {NAME} gets swapped for P1 or P2.
 
-  TITLE: 'SPUD RUSH',
-  TITLE_HINT: 'Click or press a key to start',
-  TITLE_CONTROLS_P1: 'Player 1:  W A S D to walk  ·  E to use',
-  TITLE_CONTROLS_P2: 'Player 2:  8 4 5 6 to walk  ·  7 to use',
-  TITLE_CONTROLS_NOTE: '(number pad, or the number keys along the top)',
-  PAUSED: 'Paused',
-  PAUSED_HINT: 'Click or press a key to resume',
-  GAME_OVER: 'KITCHEN CLOSED',
-  GAME_OVER_WHY: 'Too many unhappy customers',       // under GAME_OVER
-  GAME_OVER_FLAT: 'BOTH CHEFS FLAT',                 // shown when the batteries ran out instead
-  GAME_OVER_FLAT_WHY: 'Both batteries ran out at once',
-  GAME_OVER_HINT: 'Press R to go again',
-  TITLE_BATTERY: 'Keep your batteries up — stand on the charger to refill',
-  // The helper-robot lines. Keep each one about this long or shorter —
-  // anything wider than the screen gets squashed to fit.
-  TITLE_HELPERS: 'Parts table: empty hands + E / 7 buys a helper for coins',
-  TITLE_FLAT: 'Helper or partner gone flat? Empty hands + E / 7 lifts it,',
-  TITLE_FLAT_2: 'then walk onto the charger to wake it up',
-  TITLE_MUTE: 'M to mute',
-  HUD_P1: 'P1',           // the labels on the two batteries in the top corner
-  HUD_P2: 'P2',
-  BEST_LABEL: 'Best: ',
-  COINS_LABEL: ' coins',
+  TEXT: {
+    TITLE:            'SPUD RUSH: KITCHEN WARS',
+    SUBTITLE:         'First to ${TARGET} wins!',
+    HOW_TO_PLAY:      'Walk into 3 ingredients  →  walk into the 🔥 oven  →  grab the plate  →  serve the customer',
+    HOW_TO_PLAY_2:    'Wrong armful? Walk into the 🗑️ bin.   Earn points, then sabotage your rival!',
+    P1_CONTROLS:      'P1 👨‍🍳   Move: W A S D     Sabotage: 1 = 🧊 Oven Freeze   2 = 🧈 Slippery Floor',
+    P2_CONTROLS:      'P2 👩‍🍳   Move: Arrow keys   Sabotage: 7 = 🧊 Oven Freeze   8 = 🧈 Slippery Floor',
+    PRESS_START:      'Press any key to start',
+    MUTE_HINT:        'M = sound on / off',
 
+    POINTS_LABEL:     'pts',
+    LATE:             'LATE – half pay',
+    OVEN_READY:       'READY!',
+    LATE_SUFFIX:      ' (late)',
+    SERVED_WRONG:     'WRONG DISH! $0',
+    SERVED_SLOP:      'SLOP?! $0',
 
-  // ==========================================================================
-  //  BITS AND PIECES
-  // ==========================================================================
+    HINT_NEED_3:      'Need 3 ingredients!',
+    HINT_HANDS_FULL:  'Hands full! Use the 🗑️',
+    HINT_FROZEN:      '🧊 Frozen shut!',
+    HINT_COOK_FIRST:  'Cook it in the 🔥 first!',
 
-  // Where the pictures live, relative to index.html.
-  ASSETS: 'assets/',
+    NOT_ENOUGH_POINTS: 'Not enough pts!',
+    ALREADY_SABOTAGED: 'They are already sabotaged!',
+    SABOTAGE_SENT:     'Sabotage sent!',
+    SABOTAGE_FROM:     'courtesy of {NAME}',
 
-  // Set this to true to see the chef's walk box and every station's hit area
-  // drawn as dashed outlines. Handy when you've moved something and want to
-  // check the chef can still reach it. Set it back to false afterwards.
-  SHOW_ZONES: false
-
+    WINS:             '{NAME} WINS!',
+    PLAY_AGAIN:       'Press R to play again'
+  }
 };

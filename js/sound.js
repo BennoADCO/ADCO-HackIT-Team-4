@@ -1,84 +1,128 @@
 // ============================================================================
-//  SPUD RUSH — THE NOISE
+//  SPUD RUSH: KITCHEN WARS — THE NOISE
 // ============================================================================
 //
-//  There are no sound files in this game. Not one. Every beep, thud and note
-//  you hear is built by the browser the instant it is needed, out of nothing
-//  but a tone generator and a volume knob.
+//  There are no sound files in this game. Not one. Every ding, buzz, splat
+//  and fanfare you hear is built by the browser the instant it is needed,
+//  out of nothing but a tone generator (an "oscillator") and a volume knob
+//  ("gain"). That is the Web Audio API — it ships in every browser, so
+//  nothing needs to be downloaded and it still works on a laptop with no
+//  internet connection.
 //
-//  That is deliberate: it means the game has nothing to download, works with
-//  no internet, and still makes a racket on a locked-down laptop.
+//  HOW TO PLAY A SOUND FROM game.js:
+//      SOUND.play('serve');
+//    That's it. If you type a name that doesn't exist below, nothing
+//    happens — it will not crash the game.
 //
-//  If you want to change how it SOUNDS, the numbers are in config.js under
-//  "THE NOISE". If you want to change WHAT a thing sounds like, the recipes
-//  are in the RECIPES section near the bottom of this file.
+//  HOW TO ADD A NEW SOUND:
+//    1. Pick a short, clear name (e.g. 'confetti').
+//    2. Add an entry to the RECIPES object further down, built out of the
+//       three helpers explained just above it: tone(), slide() and noise().
+//    3. Call SOUND.play('confetti') from game.js whenever it should happen.
 //
-//  Nothing in here can break the game. If the browser refuses to make noise,
-//  every one of these functions quietly does nothing and the game plays on
-//  in silence.
+//  HOW TO TWEAK AN EXISTING SOUND:
+//    Find its section in RECIPES (they're in the same order as the list in
+//    the game plan, each with a one-line comment describing how it should
+//    sound). Change the numbers. Bigger frequency numbers = higher pitched.
+//    Longer duration numbers = the note rings out for longer. Play with it —
+//    you cannot break anything else by changing a number in here.
+//
+//  Nothing in this file can crash the game. Every single thing it does is
+//  wrapped in a safety net (a "try/catch") — if the browser refuses to make
+//  sound for any reason, every function below just quietly does nothing.
 //
 // ============================================================================
 
 var SOUND = (function () {
   'use strict';
 
-  var C = CONFIG;
+  // -- The sound engine, switched on the first time it's needed -------------
 
-  var ctx = null;          // the browser's sound engine, once we're allowed one
-  var master = null;       // the overall volume knob
-  var broken = false;      // true if this browser won't play ball at all
-  var muted = false;
-  var lastPlayed = {};     // when each sound last played, to stop machine-gunning
-  var noiseBuffer = null;  // a short burst of static, made once and reused
+  var ctx = null;           // the browser's sound engine (an AudioContext)
+  var broken = false;       // true if this browser won't make sound at all
+  var noiseBuffer = null;   // a short recording of static, made once and reused
 
 
   // ==========================================================================
   //  TURNING IT ON
   // ==========================================================================
   //
-  //  Browsers refuse to make any sound until the person has clicked or pressed
-  //  a key. That is a rule we cannot argue with, so we don't even try to set
-  //  up the sound engine until the first click arrives.
+  //  Browsers refuse to make any sound until the player has pressed a key or
+  //  clicked. That is a browser rule we cannot get around, so we do not even
+  //  try to build the sound engine until that first keypress arrives.
   //
-  //  The game calls unlock() from its click and keypress handlers. Calling it
-  //  a hundred times is harmless — it only does the work once.
+  //  The game calls SOUND.unlock() from its very first keydown handler.
+  //  Calling it many times is completely safe — it only sets things up once.
 
-  function unlock() {
-    if (broken) return;
+  function ensureContext() {
+    if (broken) return null;
 
     try {
       if (!ctx) {
         var Engine = window.AudioContext || window.webkitAudioContext;
-        if (!Engine) { broken = true; return; }
-
+        if (!Engine) {
+          broken = true;
+          return null;
+        }
         ctx = new Engine();
+      }
 
-        master = ctx.createGain();
-        master.gain.value = C.MASTER_VOLUME;
-        master.connect(ctx.destination);
+      // Some browsers (Chrome especially) start the engine asleep until a
+      // real user action wakes it up. This nudges it awake.
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
 
+      if (!noiseBuffer) {
         makeNoiseBuffer();
       }
 
-      // Chrome starts the engine asleep. This wakes it up.
-      if (ctx.state === 'suspended') ctx.resume();
+      return ctx;
     } catch (err) {
-      // Some locked-down machines block audio entirely. Fine — play in silence.
+      // A locked-down machine can block audio entirely. That's fine — the
+      // game just plays in silence from here on.
       broken = true;
+      return null;
     }
   }
 
-  // A third of a second of static, generated once. Used for thuds, digs,
-  // clatters and hisses — anything that isn't a clean musical note.
-  function makeNoiseBuffer() {
-    var frames = Math.floor(ctx.sampleRate * 0.35);
-    noiseBuffer = ctx.createBuffer(1, frames, ctx.sampleRate);
-    var data = noiseBuffer.getChannelData(0);
-    for (var i = 0; i < frames; i++) data[i] = Math.random() * 2 - 1;
+  function unlock() {
+    try {
+      ensureContext();
+    } catch (err) {
+      // never let sound setup take the game down
+    }
   }
 
-  function ready() {
-    return !broken && ctx && !muted && C.SOUND_ON;
+  // A third of a second of pure static (random noise), generated once and
+  // reused for every splat, buzz, whoosh and scurry. Making one recording
+  // and reusing it is much cheaper than making a fresh one every time.
+  function makeNoiseBuffer() {
+    try {
+      var frames = Math.floor(ctx.sampleRate * 0.3);
+      noiseBuffer = ctx.createBuffer(1, frames, ctx.sampleRate);
+      var data = noiseBuffer.getChannelData(0);
+      for (var i = 0; i < frames; i++) {
+        data[i] = Math.random() * 2 - 1;
+      }
+    } catch (err) {
+      noiseBuffer = null;
+    }
+  }
+
+  // How loud everything should be, out of 1.0. Read fresh every time a
+  // sound plays (not stored once at the top of the file) so that if
+  // config.js changes the number, or someone edits it mid-game, the very
+  // next sound picks it up immediately.
+  function masterVolume() {
+    try {
+      if (typeof CONFIG !== 'undefined' && CONFIG.SOUND_VOLUME != null) {
+        return CONFIG.SOUND_VOLUME;
+      }
+    } catch (err) {
+      // fall through to the default below
+    }
+    return 0.4;
   }
 
 
@@ -86,63 +130,70 @@ var SOUND = (function () {
   //  THE THREE BUILDING BLOCKS
   // ==========================================================================
   //
-  //  Every sound in the game is made of these three things, on their own or
-  //  stacked on top of each other.
+  //  Every sound effect in this game is built out of these three things,
+  //  used on their own or layered on top of each other.
   //
-  //    blip()   a clean musical note
-  //    sweep()  a note that slides from one pitch to another
-  //    noise()  a burst of static
+  //    tone()   a single clean musical note
+  //    slide()  a note that glides from one pitch to another
+  //    noise()  a burst of static, filtered to sound dull or hissy
   //
-  //  The arguments are all the same idea: when to start (seconds from now),
-  //  how long to last, and how loud.
+  //  All three take "start" (seconds from right now) and "duration" (how
+  //  long the sound lasts, in seconds).
 
-  // A clean note.
-  //   shape: 'sine' (soft), 'triangle' (mellow), 'square' (chunky, arcade),
-  //          'sawtooth' (harsh, buzzy)
-  function blip(freq, start, length, shape, volume) {
+  // A single note.
+  //   type: 'sine' (soft/round), 'triangle' (mellow), 'square' (chunky,
+  //         arcade-ish), 'sawtooth' (harsh, buzzy)
+  function tone(freq, start, duration, type, volume) {
+    if (!ctx) return;
     var t = ctx.currentTime + start;
     var osc = ctx.createOscillator();
     var gain = ctx.createGain();
 
-    osc.type = shape || 'square';
+    osc.type = type || 'sine';
     osc.frequency.setValueAtTime(freq, t);
 
-    // The volume envelope: snap up fast, then fade away. Without this, notes
-    // click unpleasantly at each end.
-    gain.gain.setValueAtTime(0, t);
+    // The volume envelope: rise quickly, then fade away smoothly. Without
+    // this, notes "click" unpleasantly the moment they start or stop.
+    gain.gain.setValueAtTime(0.0001, t);
     gain.gain.linearRampToValueAtTime(volume, t + 0.008);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + length);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
 
     osc.connect(gain);
-    gain.connect(master);
+    gain.connect(ctx.destination);
     osc.start(t);
-    osc.stop(t + length + 0.02);
+    osc.stop(t + duration + 0.03);
   }
 
-  // A note that slides in pitch. Going down sounds sad or wet; going up
-  // sounds hopeful or electrical.
-  function sweep(fromFreq, toFreq, start, length, shape, volume) {
+  // A note that glides in pitch from one frequency to another. Sliding down
+  // tends to sound sad, wet or deflating. Sliding up tends to sound
+  // hopeful, alarming or electric, depending on the waveform.
+  function slide(fromFreq, toFreq, start, duration, type, volume) {
+    if (!ctx) return;
     var t = ctx.currentTime + start;
     var osc = ctx.createOscillator();
     var gain = ctx.createGain();
 
-    osc.type = shape || 'sine';
+    osc.type = type || 'sine';
     osc.frequency.setValueAtTime(fromFreq, t);
-    osc.frequency.exponentialRampToValueAtTime(Math.max(1, toFreq), t + length);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(1, toFreq), t + duration);
 
-    gain.gain.setValueAtTime(0, t);
+    gain.gain.setValueAtTime(0.0001, t);
     gain.gain.linearRampToValueAtTime(volume, t + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + length);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
 
     osc.connect(gain);
-    gain.connect(master);
+    gain.connect(ctx.destination);
     osc.start(t);
-    osc.stop(t + length + 0.02);
+    osc.stop(t + duration + 0.03);
   }
 
-  // A burst of static, with a filter to colour it.
-  //   cutoff: low numbers (300) = a dull thud, high numbers (6000) = a hiss
-  function noise(start, length, cutoff, volume, sweepTo) {
+  // A burst of static, run through a filter to colour it.
+  //   cutoff: low numbers (around 300) sound like a dull thud or splat,
+  //           high numbers (around 5000) sound like a hiss or sizzle
+  //   sweepTo: optional — if set, the filter slides from "cutoff" to this
+  //            value over the sound's duration (a splat trailing off, etc.)
+  function noise(start, duration, cutoff, volume, sweepTo) {
+    if (!ctx || !noiseBuffer) return;
     var t = ctx.currentTime + start;
     var source = ctx.createBufferSource();
     var filter = ctx.createBiquadFilter();
@@ -152,174 +203,168 @@ var SOUND = (function () {
 
     filter.type = 'lowpass';
     filter.frequency.setValueAtTime(cutoff, t);
-    if (sweepTo) filter.frequency.exponentialRampToValueAtTime(Math.max(1, sweepTo), t + length);
+    if (sweepTo) {
+      filter.frequency.exponentialRampToValueAtTime(Math.max(1, sweepTo), t + duration);
+    }
 
     gain.gain.setValueAtTime(volume, t);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + length);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
 
     source.connect(filter);
     filter.connect(gain);
-    gain.connect(master);
+    gain.connect(ctx.destination);
     source.start(t);
-    source.stop(t + length + 0.02);
+    source.stop(t + duration + 0.03);
   }
 
-  // A little run of notes, one after the other.
-  function run(freqs, start, gap, length, shape, volume) {
+  // A quick run of notes, one after another. Handy for jingles and fanfares.
+  function run(freqs, start, gap, duration, type, volume) {
     for (var i = 0; i < freqs.length; i++) {
-      blip(freqs[i], start + i * gap, length, shape, volume);
+      tone(freqs[i], start + i * gap, duration, type, volume);
     }
   }
 
 
   // ==========================================================================
-  //  THE RECIPES — what each thing in the game sounds like
+  //  THE RECIPES — what each effect actually sounds like
   // ==========================================================================
   //
-  //  Each entry is a function that gets told how loud to be. To change how
-  //  something sounds, change the numbers here. Bigger frequency numbers are
-  //  higher pitched. Middle C is about 262.
+  //  Each recipe is a function that gets told how loud ("v", short for
+  //  volume) it is allowed to be, from 0 up to 1. To change how something
+  //  sounds, change the numbers in its section below. Bigger frequency
+  //  numbers are higher pitched — middle C is about 262.
 
   var RECIPES = {
 
-    // --- Making a potato ----------------------------------------------------
+    // --- Round start ----------------------------------------------------
 
-    // Yanking one out of the soil: a dull, earthy thump.
-    dig: function (v) {
-      noise(0, 0.18, 700, 0.5 * v, 180);
-      blip(110, 0, 0.1, 'sine', 0.22 * v);
+    // A quick, upbeat four-note climb. Plays once when a round begins.
+    start: function (v) {
+      run([392, 523, 659, 784], 0, 0.09, 0.16, 'triangle', 0.3 * v);
     },
 
-    // Dunking it in paint: a wet downward gloop.
-    dunk: function (v) {
-      sweep(620, 190, 0, 0.22, 'sine', 0.3 * v);
-      noise(0.02, 0.14, 1400, 0.16 * v, 500);
-    },
+    // --- Everyday kitchen actions -----------------------------------------
 
-    // --- The oven -----------------------------------------------------------
-
-    ovenIn: function (v) {
-      blip(150, 0, 0.09, 'square', 0.25 * v);
-      noise(0, 0.1, 500, 0.2 * v);
-    },
-
-    ovenOut: function (v) {
-      sweep(260, 480, 0, 0.1, 'square', 0.22 * v);
-    },
-
-    // THE IMPORTANT ONE. A clean two-note chime the moment a potato hits
-    // perfect, so you can cook by ear from the other side of the kitchen.
-    ovenReady: function (v) {
-      blip(1046, 0, 0.14, 'triangle', 0.3 * v);
-      blip(1568, 0.09, 0.22, 'triangle', 0.26 * v);
-    },
-
-    // It has tipped over into burnt. Not always bad — someone may have
-    // ordered it that way — so this is a nudge, not an alarm.
-    ovenBurnt: function (v) {
-      blip(300, 0, 0.1, 'sawtooth', 0.16 * v);
-      blip(220, 0.08, 0.16, 'sawtooth', 0.16 * v);
-    },
-
-    // Left in far too long. Now it is genuinely ruined.
-    ovenRuined: function (v) {
-      noise(0, 0.5, 4000, 0.22 * v, 300);
-      sweep(200, 70, 0, 0.45, 'sawtooth', 0.14 * v);
-    },
-
-    // --- Carrying things around ---------------------------------------------
-
-    bin: function (v) {
-      noise(0, 0.28, 2600, 0.34 * v, 400);
-      sweep(380, 120, 0, 0.24, 'square', 0.14 * v);
-    },
-
-    drop: function (v) {
-      noise(0, 0.1, 420, 0.24 * v);
-    },
-
+    // Picking up an ingredient: a tiny, soft blip. This fires constantly
+    // while people play, so it is kept deliberately quiet and short —
+    // it should be felt more than heard.
     pickup: function (v) {
-      blip(560, 0, 0.06, 'square', 0.18 * v);
+      tone(880, 0, 0.05, 'sine', 0.12 * v);
     },
 
-    // --- Customers ----------------------------------------------------------
-
-    // A polite robot clearing its throat at the hatch.
-    arrive: function (v) {
-      blip(523, 0, 0.09, 'square', 0.2 * v);
-      blip(784, 0.1, 0.12, 'square', 0.2 * v);
+    // Food going into the oven: a soft whoosh followed by a thunk.
+    ovenLoad: function (v) {
+      noise(0, 0.12, 900, 0.24 * v, 200);
+      tone(140, 0.04, 0.08, 'square', 0.2 * v);
     },
 
-    // You got it right. A bright major arpeggio — the best sound in the game,
-    // and the one the room will be chasing.
-    serveGood: function (v) {
-      run([523, 659, 784], 0, 0.07, 0.18, 'triangle', 0.3 * v);
-      blip(1046, 0.21, 0.3, 'triangle', 0.26 * v);
+    // The oven timer going off: a clean two-tone "ding-ding", the same
+    // note played twice, like a kitchen timer.
+    ovenDone: function (v) {
+      tone(1568, 0, 0.12, 'triangle', 0.3 * v);
+      tone(1568, 0.16, 0.14, 'triangle', 0.3 * v);
     },
 
-    // Wrong potato. Two flat notes downward — unmistakably a mistake.
-    serveBad: function (v) {
-      blip(233, 0, 0.16, 'sawtooth', 0.26 * v);
-      blip(220, 0.01, 0.16, 'sawtooth', 0.2 * v);   // slightly out of tune on purpose
-      blip(175, 0.15, 0.3, 'sawtooth', 0.24 * v);
+    // Grabbing the plate to carry a dish: a small, bright pop.
+    plateUp: function (v) {
+      tone(1200, 0, 0.03, 'sine', 0.1 * v);
+      tone(1600, 0.02, 0.06, 'sine', 0.22 * v);
     },
 
-    // Coins landing, played over the top of serveGood.
-    coins: function (v) {
-      blip(1318, 0.26, 0.07, 'square', 0.16 * v);
-      blip(1760, 0.33, 0.12, 'square', 0.16 * v);
+    // Throwing something in the bin: a low descending "bloop" with a
+    // wet little splat underneath it.
+    bin: function (v) {
+      slide(500, 120, 0, 0.22, 'sine', 0.28 * v);
+      noise(0.05, 0.15, 800, 0.18 * v, 150);
     },
 
-    // A customer has given up and stormed off.
-    strike: function (v) {
-      sweep(180, 60, 0, 0.5, 'sawtooth', 0.3 * v);
-      noise(0, 0.3, 900, 0.2 * v, 200);
+    // --- Serving customers ------------------------------------------------
+
+    // Right dish, on time: a satisfying cash-register "ka-ching". This is
+    // the best sound in the game and should feel like it.
+    serve: function (v) {
+      run([1046, 1568], 0, 0.06, 0.14, 'square', 0.3 * v);
+      tone(2093, 0.1, 0.28, 'triangle', 0.26 * v);
     },
 
-    // --- The battery --------------------------------------------------------
-
-    // Repeats once a second while the battery is nearly flat. Kept soft and
-    // high so it nags without drowning everything else out.
-    batteryLow: function (v) {
-      blip(1200, 0, 0.07, 'square', 0.16 * v);
-      blip(1200, 0.12, 0.07, 'square', 0.12 * v);
+    // Right dish, but late: the same idea as serve(), just lower pitched,
+    // quieter and without the sparkle on top — a weaker, flatter payoff.
+    serveLate: function (v) {
+      run([784, 1046], 0, 0.09, 0.16, 'square', 0.16 * v);
+      tone(1318, 0.14, 0.18, 'triangle', 0.1 * v);
     },
 
-    // While standing on the pad. Pitch climbs as the battery fills.
-    charge: function (v, pitch) {
-      blip(600 + (pitch || 0) * 900, 0, 0.05, 'triangle', 0.1 * v);
+    // Wrong dish: a sad, descending buzzer — a "wah wah" that leaves no
+    // doubt a mistake was just made.
+    wrong: function (v) {
+      slide(300, 90, 0, 0.28, 'sawtooth', 0.26 * v);
+      slide(220, 70, 0.22, 0.3, 'sawtooth', 0.18 * v);
     },
 
-    // --- The parts table ----------------------------------------------------
+    // --- The sabotage shop --------------------------------------------------
 
-    // A new helper robot assembling itself.
-    build: function (v) {
-      run([262, 330, 392, 523], 0, 0.08, 0.16, 'square', 0.26 * v);
-      sweep(400, 1600, 0.3, 0.25, 'sawtooth', 0.18 * v);
-      noise(0.3, 0.2, 3000, 0.16 * v, 800);
+    // Buying a sabotage: a sneaky, low two-note "heh heh" for the player
+    // who just bought trouble for their rival.
+    buy: function (v) {
+      tone(180, 0, 0.08, 'sawtooth', 0.2 * v);
+      tone(150, 0.11, 0.1, 'sawtooth', 0.2 * v);
     },
 
-    // You cannot afford one.
-    nope: function (v) {
-      blip(150, 0, 0.13, 'square', 0.24 * v);
-      blip(140, 0.13, 0.18, 'square', 0.2 * v);
+    // Trying to buy something you can't afford: a short, dull "bonk".
+    dud: function (v) {
+      tone(140, 0, 0.09, 'square', 0.2 * v);
+      noise(0, 0.07, 400, 0.12 * v);
     },
 
-    // --- Starting and stopping ----------------------------------------------
+    // --- Getting sabotaged (played for the victim, so they know exactly
+    //     what just happened to them) ---------------------------------------
 
-    newRound: function (v) {
-      run([392, 523, 659], 0, 0.08, 0.14, 'triangle', 0.24 * v);
+    // A generic hit: a nasty, harsh double buzz — an alarm going off in
+    // your kitchen.
+    sabotage: function (v) {
+      tone(160, 0, 0.15, 'sawtooth', 0.3 * v);
+      tone(160, 0.18, 0.15, 'sawtooth', 0.3 * v);
+      noise(0, 0.3, 2500, 0.18 * v, 600);
     },
 
-    // Three strikes.
-    gameOver: function (v) {
-      run([523, 440, 349, 262], 0, 0.17, 0.3, 'triangle', 0.3 * v);
+    // Frozen oven: an icy, high shimmer that tumbles downward, like
+    // sparkling ice crystals falling.
+    freeze: function (v) {
+      run([2093, 1864, 1568, 1318], 0, 0.07, 0.2, 'sine', 0.22 * v);
     },
 
-    // Ran the battery flat. Lower and slower — a robot winding down.
-    powerDown: function (v) {
-      sweep(440, 40, 0, 1.1, 'sawtooth', 0.3 * v);
-      sweep(660, 60, 0.05, 1.0, 'triangle', 0.16 * v);
+    // Controls reversed: a classic slide-whistle "wheeoo" — down, then
+    // straight back up.
+    slip: function (v) {
+      slide(700, 200, 0, 0.18, 'sine', 0.26 * v);
+      slide(200, 700, 0.18, 0.18, 'sine', 0.22 * v);
+    },
+
+    // Rats let loose: a rapid burst of tiny, squeaky, randomised chitters.
+    rat: function (v) {
+      var i;
+      for (i = 0; i < 6; i++) {
+        tone(1500 + Math.random() * 900, i * 0.05, 0.04, 'square', 0.14 * v);
+      }
+    },
+
+    // A Karen sent to complain: one long, rising, indignant wail — the
+    // only long sound in the game, about a second and a half of pure
+    // outrage sliding upward.
+    karen: function (v) {
+      slide(380, 850, 0, 0.7, 'sawtooth', 0.22 * v);
+      slide(400, 880, 0.12, 0.7, 'square', 0.14 * v);
+      slide(850, 1050, 0.7, 0.6, 'sawtooth', 0.18 * v);
+    },
+
+    // --- Round end ----------------------------------------------------------
+
+    // Winning the round: a triumphant fanfare — a quick climbing run of
+    // notes, finishing on a big held chord.
+    win: function (v) {
+      run([523, 659, 784, 1046], 0, 0.12, 0.22, 'triangle', 0.3 * v);
+      tone(1568, 0.5, 1.0, 'triangle', 0.28 * v);
+      tone(1046, 0.5, 1.0, 'square', 0.16 * v);
     }
   };
 
@@ -328,30 +373,21 @@ var SOUND = (function () {
   //  PLAYING A SOUND
   // ==========================================================================
 
-  // Make a noise. 'name' is one of the recipes above.
-  // options.gain makes it quieter (helper robots use this so five robots
-  // working at once doesn't turn into soup).
-  function play(name, options) {
-    if (!ready()) return;
-
-    var recipe = RECIPES[name];
-    if (!recipe) return;          // unknown name: do nothing rather than crash
-
-    // Don't let the same sound retrigger instantly — that is what turns four
-    // busy helper robots into a machine gun.
-    //
-    // Note the "!== undefined". The clock starts at zero, and zero counts as
-    // "nothing" in JavaScript, so checking the plain value here would skip the
-    // throttle for the first sound of each kind in the opening seconds.
-    var now = ctx.currentTime;
-    var last = lastPlayed[name];
-    if (last !== undefined && now - last < C.SOUND_THROTTLE) return;
-    lastPlayed[name] = now;
-
-    var volume = C.SFX_VOLUME * ((options && options.gain) || 1);
-
+  // Make a noise. 'name' must match one of the recipe names above exactly.
+  // An unrecognised name is ignored — this deliberately never throws an
+  // error, so a typo in game.js can never crash the game.
+  function play(name) {
     try {
-      recipe(volume, options && options.pitch);
+      if (api.muted) return;
+
+      var recipe = RECIPES[name];
+      if (!recipe) return;
+
+      var context = ensureContext();
+      if (!context) return;
+
+      var volume = masterVolume();
+      recipe(volume);
     } catch (err) {
       // One duff sound must never take the game down with it.
     }
@@ -359,128 +395,31 @@ var SOUND = (function () {
 
 
   // ==========================================================================
-  //  THE BACKGROUND TUNE
-  // ==========================================================================
-  //
-  //  A short loop of a bass line and a melody. Both use a pentatonic scale,
-  //  which is the trick that makes it impossible for the notes to clash.
-  //
-  //  The timing is the fiddly part. We cannot just play a note every beat
-  //  using a normal timer — those drift, and within half a minute the tune
-  //  would audibly stagger. Instead a timer wakes up every 25 thousandths of
-  //  a second, looks a little way into the future, and books in any notes due
-  //  to play during that window. The sound engine then plays them at exactly
-  //  the right moment.
-
-  var BASS =   [110, 110, 165, 110, 147, 147, 110, 110];
-  var MELODY = [440, 550, 660, 550, 494, 587, 440, 330,
-                440, 660, 550, 440, 392, 494, 587, 440];
-
-  var musicOn = false;
-  var nextNoteTime = 0;
-  var step = 0;
-  var timer = null;
-  var tempoScale = 0;      // 0 at the start of a round, 1 when it's frantic
-
-  function beatLength() {
-    var bpm = C.MUSIC_BPM_START + (C.MUSIC_BPM_MAX - C.MUSIC_BPM_START) * tempoScale;
-    return 60 / bpm / 2;   // we play two notes per beat
-  }
-
-  function scheduleStep(time) {
-    var v = C.MUSIC_VOLUME;
-
-    // Bass on every step.
-    var bass = BASS[step % BASS.length];
-    blipAt(bass, time, beatLength() * 0.9, 'square', v * 0.32);
-
-    // Melody on every other step, so it doesn't fight the bass.
-    if (step % 2 === 0) {
-      var note = MELODY[Math.floor(step / 2) % MELODY.length];
-      blipAt(note, time, beatLength() * 1.4, 'triangle', v * 0.2);
-    }
-
-    step++;
-  }
-
-  // Same as blip(), but booked for an exact moment rather than "seconds
-  // from now". The tune needs this precision; one-off effects don't.
-  function blipAt(freq, t, length, shape, volume) {
-    var osc = ctx.createOscillator();
-    var gain = ctx.createGain();
-    osc.type = shape;
-    osc.frequency.setValueAtTime(freq, t);
-    gain.gain.setValueAtTime(0, t);
-    gain.gain.linearRampToValueAtTime(volume, t + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + length);
-    osc.connect(gain);
-    gain.connect(master);
-    osc.start(t);
-    osc.stop(t + length + 0.02);
-  }
-
-  function tick() {
-    if (!ready() || !musicOn) return;
-
-    // Book every note falling in the next tenth of a second.
-    while (nextNoteTime < ctx.currentTime + 0.1) {
-      scheduleStep(nextNoteTime);
-      nextNoteTime += beatLength();
-    }
-  }
-
-  function startMusic() {
-    if (!ready() || musicOn) return;
-    musicOn = true;
-    step = 0;
-    nextNoteTime = ctx.currentTime + 0.05;
-    if (!timer) timer = setInterval(tick, 25);
-  }
-
-  function stopMusic() {
-    musicOn = false;
-  }
-
-  // The game calls this every frame with 'title', 'play', 'paused' or 'over'.
-  // The tune plays during a round and stops the rest of the time.
-  function setMode(mode, elapsed) {
-    if (broken || !ctx) return;
-
-    if (typeof elapsed === 'number') {
-      tempoScale = Math.max(0, Math.min(1, elapsed / C.MUSIC_RAMP_SECONDS));
-    }
-
-    if (mode === 'play' && C.SOUND_ON && !muted) startMusic();
-    else stopMusic();
-  }
-
-
-  // ==========================================================================
   //  MUTE
   // ==========================================================================
   //
-  //  M switches the sound off and on again. It is deliberately NOT remembered:
-  //  every time the game is opened the sound starts ON, so the next person to
-  //  play isn't left wondering why it's silent.
+  //  Flips sound off and on. The flag lives on SOUND.muted so the game can
+  //  check it directly (e.g. to show a speaker icon), and toggleMute() is
+  //  how the game flips it.
 
   function toggleMute() {
-    muted = !muted;
-    if (muted) stopMusic();
-    return muted;
-  }
-
-  function isMuted() {
-    return muted;
+    try {
+      api.muted = !api.muted;
+    } catch (err) {
+      // if this somehow fails, sound simply keeps working as before
+    }
+    return api.muted;
   }
 
 
   // What the rest of the game is allowed to call.
-  return {
-    unlock: unlock,
+  var api = {
     play: play,
-    setMode: setMode,
+    unlock: unlock,
     toggleMute: toggleMute,
-    isMuted: isMuted
+    muted: false
   };
+
+  return api;
 
 })();

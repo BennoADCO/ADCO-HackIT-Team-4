@@ -1,62 +1,57 @@
 /* ==========================================================================
-   SPUD RUSH — the page around the game
-
-   This file only controls the web page the game sits on: the background
-   colour, the centring, and the line of text underneath.
-
-   It does NOT control anything inside the kitchen. Potato sizes, station
-   positions and colours all live in js/config.js.
+   SPUD RUSH: KITCHEN WARS — the page around the game
+   The game itself is drawn in js/game.js. This file just centres it on a
+   dark background and scales it to fit the window.
    ========================================================================== */
 
-
-/* Fill the whole browser window and put everything in the middle. */
-html, body {
+html,
+body {
   margin: 0;
   height: 100%;
-  background: #2a2320;          /* the dark brown around the game */
-  color: #d9d2c2;
+  background: #14121c;
+  color: #cfd3e0;
+  font-family: "Segoe UI", Arial, sans-serif;
+}
 
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.stage {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 16px;
-
-  font-family: system-ui, "Segoe UI", sans-serif;
+  gap: 10px;
 }
 
-
-/* The game itself.
-
-   The canvas is 1000 x 1000 real dots, but the game thinks it is 500 x 500
-   and draws at double size so it stays sharp. The rule below stretches it to
-   fit the window without ever changing those numbers.
-
-   "vmin" means "the smaller of the window's width and height", so the game
-   always stays square and always fits, whatever shape the window is. */
+/* The game is always 900 x 600 inside; this stretches it to fit the window
+   while keeping its shape (3 wide for every 2 tall). */
 #game {
-  width: min(88vmin, 900px);
-  height: min(88vmin, 900px);
-
   display: block;
-  border-radius: 8px;
-  outline: none;
-  cursor: pointer;
-
-  background: #d3ccbc;          /* shows for a moment before the art loads */
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  width: min(96vw, calc((100vh - 60px) * 1.5));
+  height: auto;
+  aspect-ratio: 3 / 2;
+  border-radius: 10px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+  background: #000;
 }
 
-
-/* The controls reminder under the game. */
 .hint {
   margin: 0;
   font-size: 14px;
+  opacity: 0.8;
   text-align: center;
-  color: #9a9086;
 }
 
-.hint b {
-  color: #f2c230;
-  font-weight: 600;
+.hint .p1 {
+  color: #3aa0ff;
+  font-weight: bold;
+}
+
+.hint .p2 {
+  color: #ff5c8a;
+  font-weight: bold;
 }

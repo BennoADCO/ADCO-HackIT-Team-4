@@ -1,41 +1,28 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<title>Spud Rush</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-
-<!-- The look of the page around the game. Not the game itself. -->
-<link rel="stylesheet" href="css/style.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SPUD RUSH: KITCHEN WARS</title>
+  <link rel="stylesheet" href="css/style.css">
 </head>
-
 <body>
+  <main class="stage">
+    <!-- The game draws itself onto this rectangle -->
+    <canvas id="game" width="900" height="600"></canvas>
+    <p class="hint">
+      <span class="p1">P1</span> W A S D to move &middot; 1 🧊 2 🧈 to sabotage
+      &nbsp;&nbsp;|&nbsp;&nbsp;
+      <span class="p2">P2</span> Arrow keys to move &middot; 7 🧊 8 🧈 to sabotage
+      &nbsp;&nbsp;|&nbsp;&nbsp;
+      M = mute
+    </p>
+  </main>
 
-  <!-- The game is drawn entirely inside this one square. -->
-  <canvas id="game" width="1000" height="1000"></canvas>
-
-  <!-- If you change the keys in js/config.js, change this line to match. -->
-  <p class="hint">
-    Player 1: <b>W A S D</b> to walk, <b>E</b> to use
-    &nbsp;·&nbsp; Player 2: <b>8 4 5 6</b> to walk, <b>7</b> to use
-    (number pad or top row)
-    <br>
-    Each player uses whatever is glowing in their colour
-    &nbsp;·&nbsp; <b>R</b> to start again &nbsp;·&nbsp; <b>M</b> to mute
-  </p>
-
-  <!--
-    The three script files, in the order they must load.
-
-      config.js  —  every number and word in the game. Edit this one.
-      sound.js   —  makes all the beeps and the tune. No sound files needed.
-      game.js    —  the rules and the drawing. Edit this one less often.
-
-    config.js MUST come first, because the other two read its settings.
-  -->
-  <script src="js/config.js"></script>
-  <script src="js/sound.js"></script>
-  <script src="js/game.js"></script>
-
+  <!-- Load order matters: settings first, then sound, then engine, then the rules -->
+  <script src="js/config.js" charset="utf-8"></script>
+  <script src="js/sound.js" charset="utf-8"></script>
+  <script src="js/engine.js" charset="utf-8"></script>
+  <script src="js/game.js" charset="utf-8"></script>
 </body>
 </html>
